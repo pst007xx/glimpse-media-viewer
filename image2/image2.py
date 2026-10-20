@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Image2 — a simple image viewer for GNOME, built with GTK 4 and libadwaita."""
 
+import filecmp
 import json
 import math
 import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from xml.sax.saxutils import escape as xml_escape
 
 import gi
 
@@ -29,6 +31,157 @@ ZOOM_MAX = 32.0
 
 _BOLD = Pango.AttrList()
 _BOLD.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
+
+WALLPAPER_SCHEMA = "org.gnome.desktop.background"
+
+# (group, [(description, accelerators)]) for the Keyboard Shortcuts window
+SHORTCUTS = [
+    ("General", [
+        ("Open image", "<Control>o"),
+        ("Open folder", "<Control><Shift>o"),
+        ("Preferences", "<Control>comma"),
+        ("Keyboard shortcuts", "<Control>question"),
+        ("Help", "F1"),
+        ("Close window", "<Control>w"),
+        ("Quit", "<Control>q"),
+    ]),
+    ("Navigation", [
+        ("Next image", "Right Page_Down space"),
+        ("Previous image", "Left Page_Up BackSpace"),
+        ("First / last image", "Home End"),
+        ("Toggle sidebar", "F9"),
+        ("Fullscreen", "F11"),
+        ("Leave fullscreen", "Escape"),
+    ]),
+    ("Zoom", [
+        ("Zoom in", "plus <Control>plus"),
+        ("Zoom out", "minus <Control>minus"),
+        ("Best fit", "0 <Control>0"),
+        ("Original size", "1 <Control>1"),
+    ]),
+    ("Files", [
+        ("Select all images", "<Control>a"),
+        ("Copy to folder", "<Control><Shift>c"),
+        ("Move to folder", "<Control><Shift>m"),
+        ("Move to pinned folder 1–9", "<Alt>1...<Alt>9"),
+        ("Copy to pinned folder 1–9", "<Control><Alt>1...<Control><Alt>9"),
+        ("Rename", "F2"),
+        ("Delete", "Delete"),
+        ("Open in external editor", "<Control>e"),
+    ]),
+]
+
+# (page title, icon, [(group title, [(row title, row text)])]) for the Help dialog
+HELP = [
+    ("Viewing", "image-x-generic-symbolic", [
+        ("Opening Images", [
+            ("Open an image or folder",
+             "Use the open button (Ctrl+O), Open Folder… in the main menu (Ctrl+Shift+O), drag an image "
+             "or folder onto the window, or choose Image2 under Open With… in Files."),
+            ("Browse the folder",
+             "Every image in the opened image's folder is listed in the sidebar. Use the arrow buttons, "
+             "Left/Right, Page Up/Down or Space/Backspace to step through them, Home/End for first/last."),
+            ("Image details",
+             "The title bar shows the file name, its position in the folder, its size in pixels and on disk."),
+        ]),
+        ("Zooming", [
+            ("Zoom in and out",
+             "Use the zoom buttons, + and −, Ctrl+mouse wheel (zooms towards the pointer) or pinch on a touchpad."),
+            ("Best fit and original size",
+             "Press 0 for best fit or 1 for 100 %. Clicking the percentage or double-clicking the image "
+             "switches between the two."),
+            ("Pan around", "When zoomed in, drag the image or use the scrollbars."),
+        ]),
+        ("Window", [
+            ("Sidebar", "Show or hide the sidebar with its button or F9. It collapses automatically in narrow windows."),
+            ("Fullscreen", "Press F11 or choose Fullscreen in the main menu. Escape leaves fullscreen."),
+        ]),
+    ]),
+    ("Organising", "folder-symbolic", [
+        ("Pinned Folders", [
+            ("Pin folders",
+             "Click + above Folders, choose Pin Current Folder to Sidebar in the main menu, or drag folders "
+             "from Files onto the Folders list. Your Pictures folder is pinned the first time Image2 starts."),
+            ("Browse subfolders", "Expand a folder with its arrow; click any folder to show its images."),
+            ("Folder menu",
+             "Right-click a folder to open it, show it in Files, move or copy the selected images into it, "
+             "create a new subfolder, or pin/unpin it."),
+        ]),
+        ("Moving and Copying", [
+            ("Select several images", "Ctrl-click or Shift-click in the image list, or press Ctrl+A to select all."),
+            ("Drag onto a folder",
+             "Drag images from the list onto a folder to move them there. Hold Ctrl while dropping to copy."),
+            ("Quick keys", "Alt+1…9 moves the selection into pinned folder 1–9; Ctrl+Alt+1…9 copies it."),
+            ("Copy or move to any folder",
+             "Use the buttons under the image list, the right-click menu, Ctrl+Shift+C or Ctrl+Shift+M."),
+            ("Undo", "After a move, click Undo in the message at the bottom of the window to put the images back."),
+            ("No overwriting",
+             "If a file with the same name already exists, the new one is saved as “name (2).jpg” instead."),
+        ]),
+        ("Renaming and Deleting", [
+            ("Rename", "Select one image and press F2 or use the rename button."),
+            ("Delete",
+             "Press Delete or use the trash button. Images go to the Trash unless you turn that off in Preferences; "
+             "permanent deletion always asks first."),
+        ]),
+    ]),
+    ("Editing & More", "document-edit-symbolic", [
+        ("External Editor", [
+            ("Choose an editor",
+             "In Preferences, pick an installed graphics app or enter a custom command such as “gimp %f”."),
+            ("Open in the editor",
+             "Press Ctrl+E or use the edit button. When the editor saves, Image2 reloads the image automatically."),
+            ("Other apps", "Open With… lets you pick any installed app for the current image."),
+        ]),
+        ("Wallpaper", [
+            ("Set as wallpaper",
+             "Choose Set as Wallpaper in the main menu or the right-click menu. Image2 copies the image to "
+             "~/.local/share/backgrounds and uses it for both the light and dark desktop style, so the "
+             "wallpaper keeps working if you later move or delete the original."),
+        ]),
+        ("Preferences", [
+            ("Image list", "Turn thumbnails on or off, show hidden files, and sort by name or date modified."),
+            ("Supported formats",
+             "Image2 opens every format your system's image loaders support, such as JPEG, PNG, WebP, AVIF, "
+             "HEIC, TIFF, GIF, SVG and BMP."),
+        ]),
+    ]),
+]
+
+
+def build_shortcuts_window():
+    def attr(name, value):
+        return f'<property name="{name}">{xml_escape(value)}</property>'
+
+    groups = []
+    for title, shortcuts in SHORTCUTS:
+        items = "".join(
+            f'<child><object class="GtkShortcutsShortcut">{attr("title", desc)}{attr("accelerator", accel)}'
+            f'</object></child>' for desc, accel in shortcuts)
+        groups.append(f'<child><object class="GtkShortcutsGroup">{attr("title", title)}{items}</object></child>')
+    ui = ('<interface><object class="GtkShortcutsWindow" id="shortcuts"><property name="modal">1</property>'
+          '<child><object class="GtkShortcutsSection"><property name="section-name">shortcuts</property>'
+          '<property name="max-height">12</property>' + "".join(groups) +
+          '</object></child></object></interface>')
+    return Gtk.Builder.new_from_string(ui, -1).get_object("shortcuts")
+
+
+class HelpDialog(Adw.PreferencesDialog):
+    """Help topics, laid out like Preferences so they get a built-in search."""
+
+    def __init__(self):
+        super().__init__(title="Help", search_enabled=True)
+        for page_title, icon, groups in HELP:
+            page = Adw.PreferencesPage(title=page_title, icon_name=icon)
+            for group_title, rows in groups:
+                group = Adw.PreferencesGroup(title=group_title)
+                for title, text in rows:
+                    row = Adw.ActionRow(title=title, subtitle=GLib.markup_escape_text(text),
+                                        subtitle_selectable=True)
+                    group.add(row)
+                page.add(group)
+            self.add(page)
+
 
 CSS = """
 .folder-row:drop(active) {
@@ -599,10 +752,15 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Open in Editor", "win.edit")
         section.append("Open With…", "win.open-with")
+        section.append("Set as Wallpaper", "win.wallpaper")
         menu.append_section(None, section)
         section = Gio.Menu()
         section.append("Fullscreen", "win.fullscreen")
         section.append("Preferences", "app.preferences")
+        menu.append_section(None, section)
+        section = Gio.Menu()
+        section.append("Keyboard Shortcuts", "app.shortcuts")
+        section.append("Help", "app.help")
         section.append("About Image2", "app.about")
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
@@ -640,6 +798,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Open in Editor", "win.edit")
         section.append("Open With…", "win.open-with")
+        section.append("Set as Wallpaper", "win.wallpaper")
         file_menu.append_section(None, section)
         section = Gio.Menu()
         section.append("Copy to Folder…", "win.copy-to")
@@ -919,6 +1078,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-toggle": lambda *_: self.toggle_fit(),
             "edit": self.on_edit,
             "open-with": self.on_open_with,
+            "wallpaper": self.on_set_wallpaper,
             "copy-to": lambda *_: self.on_transfer(move=False),
             "move-to": lambda *_: self.on_transfer(move=True),
             "rename": self.on_rename,
@@ -1287,6 +1447,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-toggle": has_image,
             "edit": self.current_path is not None,
             "open-with": self.current_path is not None,
+            "wallpaper": has_image,
             "copy-to": bool(targets),
             "move-to": bool(targets),
             "delete": bool(targets),
@@ -1387,6 +1548,45 @@ class ImageWindow(Adw.ApplicationWindow):
         launcher.launch(self, None, done)
 
     # ---------------------------------------------------- file operations ---
+
+    def on_set_wallpaper(self, *_):
+        path = self.current_path
+        if not path:
+            return
+        source = Gio.SettingsSchemaSource.get_default()
+        schema = source.lookup(WALLPAPER_SCHEMA, True) if source else None
+        if schema is None:
+            self.toast("Setting the wallpaper isn't supported on this desktop")
+            return
+
+        # Use a private copy, like GNOME Settings does, so the wallpaper survives
+        # the original being moved, renamed or deleted while organising.
+        def work():
+            folder = os.path.join(GLib.get_user_data_dir(), "backgrounds")
+            os.makedirs(folder, exist_ok=True)
+            dest = os.path.join(folder, os.path.basename(path))
+            if os.path.exists(dest) and filecmp.cmp(path, dest, shallow=False):
+                return dest
+            dest = unique_path(folder, os.path.basename(path))
+            Gio.File.new_for_path(path).copy(Gio.File.new_for_path(dest), Gio.FileCopyFlags.NONE,
+                                             None, None, None)
+            return dest
+
+        def done(dest, error):
+            if error is not None:
+                message = error.message if isinstance(error, GLib.Error) else str(error)
+                self.toast(f"Could not set wallpaper: {message}")
+                return
+            background = Gio.Settings.new(WALLPAPER_SCHEMA)
+            uri = Gio.File.new_for_path(dest).get_uri()
+            background.set_string("picture-uri", uri)
+            if schema.has_key("picture-uri-dark"):
+                background.set_string("picture-uri-dark", uri)
+            background.set_string("picture-options", "zoom")
+            Gio.Settings.sync()
+            self.toast("Set as wallpaper")
+
+        run_in_thread(work, done)
 
     def toast(self, title, timeout=3):
         self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(title), timeout=timeout))
@@ -1654,6 +1854,8 @@ class Application(Adw.Application):
 
         for name, callback in (("quit", lambda *_: self.quit()),
                                ("about", self.on_about),
+                               ("help", self.on_help),
+                               ("shortcuts", self.on_shortcuts),
                                ("preferences", self.on_preferences)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", callback)
@@ -1662,6 +1864,8 @@ class Application(Adw.Application):
         accels = {
             "app.quit": ["<Control>q"],
             "app.preferences": ["<Control>comma"],
+            "app.help": ["F1"],
+            "app.shortcuts": ["<Control>question"],
             "window.close": ["<Control>w"],
             "win.open": ["<Control>o"],
             "win.open-folder": ["<Control><Shift>o"],
@@ -1702,6 +1906,15 @@ class Application(Adw.Application):
 
     def on_preferences(self, *_):
         PreferencesDialog(self.settings).present(self.get_active_window())
+
+    def on_help(self, *_):
+        HelpDialog().present(self.get_active_window())
+
+    def on_shortcuts(self, *_):
+        # Built on demand: GTK 4.14 logs harmless label warnings whenever one is created.
+        window = build_shortcuts_window()
+        window.set_transient_for(self.get_active_window())
+        window.present()
 
     def on_about(self, *_):
         about = Adw.AboutDialog(application_name=APP_NAME, application_icon="image-x-generic",
