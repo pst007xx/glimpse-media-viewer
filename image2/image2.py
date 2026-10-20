@@ -286,6 +286,47 @@ def find_app(app_id):
     return None
 
 
+# In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
+# dialogs and drag-and-drop give real paths; host apps are reached via the portal below.
+IN_SNAP = "SNAP" in os.environ
+
+
+def portal_open(window, path, directory=False, on_error=None):
+    """Open path in a host app (asking which) or its folder in Files, via the OpenURI portal."""
+    try:
+        fds = Gio.UnixFDList.new()
+        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        try:
+            index = fds.append(fd)
+        finally:
+            os.close(fd)
+    except (OSError, GLib.Error) as e:
+        if on_error:
+            on_error(str(e))
+        return
+    method = "OpenDirectory" if directory else "OpenFile"
+    options = {} if directory else {"ask": GLib.Variant("b", True)}
+
+    def done(bus, result):
+        try:
+            bus.call_with_unix_fd_list_finish(result)
+        except GLib.Error as e:
+            if on_error:
+                on_error(e.message)
+
+    Gio.bus_get_sync(Gio.BusType.SESSION, None).call_with_unix_fd_list(
+        "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI",
+        method, GLib.Variant("(sha{sv})", ("", index, options)), GLib.VariantType("(o)"),
+        Gio.DBusCallFlags.NONE, -1, fds, None, done)
+
+
+def show_folder(window, path):
+    if IN_SNAP:
+        portal_open(window, path, directory=True)
+    else:
+        Gtk.FileLauncher(file=Gio.File.new_for_path(path)).launch(window, None, None)
+
+
 def run_in_thread(work, done):
     """Run work() in a thread, then done(result, error) on the main loop."""
     def worker():
@@ -548,18 +589,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
             description="Used by “Open in Editor” (Ctrl+E). The image reloads automatically after you save.")
         page.add(editor)
 
-        self.apps = image_editor_candidates()
-        names = ["None"] + [a.get_display_name() for a in self.apps] + ["Custom Command"]
-        self.editor_row = Adw.ComboRow(title="Editor", model=Gtk.StringList.new(names))
-        self.editor_row.set_selected(self._editor_index())
-        self.editor_row.connect("notify::selected", self._on_editor_selected)
-        editor.add(self.editor_row)
-
-        self.command_row = Adw.EntryRow(title="Command  (%f is replaced by the file path)")
-        self.command_row.set_text(settings["editor_command"])
-        self.command_row.connect("changed", lambda row: settings.__setitem__("editor_command", row.get_text()))
-        editor.add(self.command_row)
-        self._update_command_row()
+        if IN_SNAP:
+            editor.set_description("In the Snap version, “Open in Editor” (Ctrl+E) asks which installed app "
+                                   "to use. The image reloads automatically after you save.")
+        else:
+            self._add_editor_rows(editor)
 
         # Files
         files = Adw.PreferencesGroup(title="Deleting")
@@ -577,6 +611,21 @@ class PreferencesDialog(Adw.PreferencesDialog):
         sort_row.connect("notify::selected",
                          lambda row, _: settings.__setitem__("sort_by", "date" if row.get_selected() else "name"))
         sidebar.add(sort_row)
+
+    def _add_editor_rows(self, editor):
+        settings = self.settings
+        self.apps = image_editor_candidates()
+        names = ["None"] + [a.get_display_name() for a in self.apps] + ["Custom Command"]
+        self.editor_row = Adw.ComboRow(title="Editor", model=Gtk.StringList.new(names))
+        self.editor_row.set_selected(self._editor_index())
+        self.editor_row.connect("notify::selected", self._on_editor_selected)
+        editor.add(self.editor_row)
+
+        self.command_row = Adw.EntryRow(title="Command  (%f is replaced by the file path)")
+        self.command_row.set_text(settings["editor_command"])
+        self.command_row.connect("changed", lambda row: settings.__setitem__("editor_command", row.get_text()))
+        editor.add(self.command_row)
+        self._update_command_row()
 
     def _switch(self, title, subtitle, key):
         row = Adw.SwitchRow(title=title, active=self.settings[key])
@@ -1110,8 +1159,7 @@ class ImageWindow(Adw.ApplicationWindow):
         folder_actions = {
             "folder-open": lambda a, p: self.open_path(p.get_string()),
             "wallpaper": lambda a, p: self.on_set_wallpaper(p.get_string()),
-            "folder-show": lambda a, p: Gtk.FileLauncher(
-                file=Gio.File.new_for_path(p.get_string())).launch(self, None, None),
+            "folder-show": lambda a, p: show_folder(self, p.get_string()),
             "move-here": lambda a, p: self._transfer(self.targets(), p.get_string(), True),
             "copy-here": lambda a, p: self._transfer(self.targets(), p.get_string(), False),
             "new-folder": self.on_new_folder,
@@ -1529,6 +1577,9 @@ class ImageWindow(Adw.ApplicationWindow):
         path = self.current_path
         if not path:
             return
+        if IN_SNAP:
+            self.on_open_with()  # a Snap can't start host apps itself
+            return
         mode = self.settings["editor_mode"]
         try:
             if mode == "app" and (app := find_app(self.settings["editor_app"])):
@@ -1555,6 +1606,9 @@ class ImageWindow(Adw.ApplicationWindow):
     def on_open_with(self, *_):
         if not self.current_path:
             return
+        if IN_SNAP:
+            portal_open(self, self.current_path, on_error=lambda m: self.toast(f"Could not open: {m}"))
+            return
         launcher = Gtk.FileLauncher(file=Gio.File.new_for_path(self.current_path), always_ask=True)
 
         def done(launcher, result):
@@ -1580,7 +1634,9 @@ class ImageWindow(Adw.ApplicationWindow):
         # Use a private copy, like GNOME Settings does, so the wallpaper survives
         # the original being moved, renamed or deleted while organising.
         def work():
-            folder = os.path.join(GLib.get_user_data_dir(), "backgrounds")
+            # A Snap's data dir changes with every revision; its common dir doesn't
+            base = os.environ.get("SNAP_USER_COMMON") or GLib.get_user_data_dir()
+            folder = os.path.join(base, "backgrounds")
             os.makedirs(folder, exist_ok=True)
             dest = os.path.join(folder, os.path.basename(path))
             if os.path.exists(dest) and filecmp.cmp(path, dest, shallow=False):
@@ -1680,8 +1736,7 @@ class ImageWindow(Adw.ApplicationWindow):
             if move and moved:
                 toast.connect("button-clicked", lambda *_: self._undo_move(moved))
             else:
-                toast.connect("button-clicked", lambda *_: Gtk.FileLauncher(
-                    file=Gio.File.new_for_path(dest_dir)).launch(self, None, None))
+                toast.connect("button-clicked", lambda *_: show_folder(self, dest_dir))
             self.toasts.add_toast(toast)
             if move:
                 self.rescan()
