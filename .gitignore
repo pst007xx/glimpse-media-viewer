@@ -1,2 +1,5 @@
 __pycache__/
 *.snap
+image2/parts/
+image2/stage/
+image2/prime/

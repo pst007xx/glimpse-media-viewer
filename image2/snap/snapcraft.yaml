@@ -1,4 +1,4 @@
-name: image2
+name: image2-viewer
 base: core24
 version: '1.0'
 title: Image2
@@ -16,23 +16,36 @@ description: |
 grade: stable
 confinement: strict
 license: GPL-3.0-or-later
+contact: https://github.com/pst007xx/image2
+website: https://github.com/pst007xx/image2
+source-code: https://github.com/pst007xx/image2
+issues: https://github.com/pst007xx/image2/issues
 icon: icons/io.github.imagery.Image2.svg
 
 apps:
-  image2:
-    command: usr/bin/python3 $SNAP/bin/image2
+  image2-viewer:
+    # runs on core24's own /usr/bin/python3 (snapcraft drops the staged copy as the base has it)
+    command: bin/image2
     common-id: io.github.imagery.Image2
     desktop: usr/share/applications/io.github.imagery.Image2.desktop
     # gnome supplies GTK 4, libadwaita and the desktop, wayland, x11, gsettings… plugs
     extensions: [gnome]
+    slots:
+      - dbus-image2     # lets GApplication own its app ID on the session bus
     plugs:
-      - home              # browse and organise images in your home folder
-      - removable-media   # /media and /mnt (connect manually: snap connect image2:removable-media)
+      - home             # browse and organise images in your home folder
+      - removable-media   # /media and /mnt (connect manually: snap connect image2-viewer:removable-media)
     environment:
       PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
       # GTK's own file dialog and drag-and-drop see real paths (with the home plug),
       # so opening an image can show its whole folder. See IN_SNAP in image2.py.
       GDK_DEBUG: no-portals
+
+slots:
+  dbus-image2:
+    interface: dbus
+    bus: session
+    name: io.github.imagery.Image2
 
 parts:
   image2:
@@ -49,7 +62,7 @@ parts:
       install -Dm644 icons/io.github.imagery.Image2-256.png \
         "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/256x256/apps/io.github.imagery.Image2.png"
       mkdir -p "$CRAFT_PART_INSTALL/usr/share/applications"
-      sed -e 's|@EXEC@|image2|' \
+      sed -e 's|@EXEC@|image2-viewer|' \
           -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/io.github.imagery.Image2.svg|' \
           io.github.imagery.Image2.desktop \
           > "$CRAFT_PART_INSTALL/usr/share/applications/io.github.imagery.Image2.desktop"
