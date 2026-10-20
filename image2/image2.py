@@ -1865,6 +1865,11 @@ class Application(Adw.Application):
         GLib.set_application_name(APP_NAME)
         self.settings = Settings()
         self.thumbs = ThumbnailCache()
+        # Running from the source folder: find the app icon in ./icons
+        icons = os.path.join(os.path.dirname(os.path.realpath(__file__)), "icons")
+        if os.path.isdir(icons):
+            Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(icons)
+        Gtk.Window.set_default_icon_name(APP_ID)
         css = Gtk.CssProvider()
         css.load_from_string(CSS)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
@@ -1935,7 +1940,7 @@ class Application(Adw.Application):
         window.present()
 
     def on_about(self, *_):
-        about = Adw.AboutDialog(application_name=APP_NAME, application_icon="image-x-generic",
+        about = Adw.AboutDialog(application_name=APP_NAME, application_icon=APP_ID,
                                 version=VERSION, comments="A simple image viewer for GNOME",
                                 license_type=Gtk.License.GPL_3_0)
         about.present(self.get_active_window())

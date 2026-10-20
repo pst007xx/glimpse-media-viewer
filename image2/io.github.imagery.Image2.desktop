@@ -2,7 +2,7 @@
 Name=Image2
 Comment=View and organise images
 Exec=@EXEC@ %U
-Icon=image-x-generic
+Icon=io.github.imagery.Image2
 Terminal=false
 Type=Application
 Categories=Graphics;Viewer;GTK;GNOME;

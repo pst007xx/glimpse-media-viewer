@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3584e4"/>
+      <stop offset="1" stop-color="#99c1f1"/>
+    </linearGradient>
+    <linearGradient id="hill-back" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8ff0a4"/>
+      <stop offset="1" stop-color="#57e389"/>
+    </linearGradient>
+    <linearGradient id="hill-front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2ec27e"/>
+      <stop offset="1" stop-color="#26a269"/>
+    </linearGradient>
+    <clipPath id="photo">
+      <rect x="22" y="36" width="84" height="60" rx="4"/>
+    </clipPath>
+  </defs>
+
+  <!-- Back photo, tilted: the "organiser" stack -->
+  <g transform="rotate(-9 64 64)">
+    <rect x="18" y="22" width="92" height="76" rx="9" fill="#9a9996"/>
+    <rect x="18" y="18" width="92" height="76" rx="9" fill="#deddda"/>
+    <rect x="25" y="25" width="78" height="58" rx="4" fill="#f9f06b"/>
+    <rect x="25" y="61" width="78" height="22" rx="4" fill="#f6d32d"/>
+  </g>
+
+  <!-- Front photo: frame with a bottom edge for depth -->
+  <rect x="14" y="32" width="100" height="78" rx="10" fill="#c0bfbc"/>
+  <rect x="14" y="28" width="100" height="78" rx="10" fill="#ffffff"/>
+
+  <!-- Landscape -->
+  <g clip-path="url(#photo)">
+    <rect x="22" y="36" width="84" height="60" fill="url(#sky)"/>
+    <circle cx="88" cy="52" r="8" fill="#f6d32d"/>
+    <circle cx="88" cy="52" r="5.5" fill="#f8e45c"/>
+    <path d="M22 84 L48 58 L64 72 L78 62 L106 86 L106 96 L22 96 Z" fill="url(#hill-back)"/>
+    <path d="M22 96 L22 82 C38 76 52 86 66 84 C80 82 92 76 106 80 L106 96 Z" fill="url(#hill-front)"/>
+  </g>
+</svg>
