@@ -33,6 +33,21 @@ _BOLD = Pango.AttrList()
 _BOLD.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
 
 WALLPAPER_SCHEMA = "org.gnome.desktop.background"
+# GNOME "picture-options" value → menu label
+WALLPAPER_STYLES = {
+    "centered": "Original Size",
+    "zoom": "Zoom to Fill",
+    "stretched": "Stretch to Fill",
+}
+
+
+def wallpaper_menu():
+    menu = Gio.Menu()
+    for style, label in WALLPAPER_STYLES.items():
+        item = Gio.MenuItem.new(label, None)
+        item.set_action_and_target_value("win.wallpaper", GLib.Variant("s", style))
+        menu.append_item(item)
+    return menu
 
 # (group, [(description, accelerators)]) for the Keyboard Shortcuts window
 SHORTCUTS = [
@@ -135,7 +150,10 @@ HELP = [
         ]),
         ("Wallpaper", [
             ("Set as wallpaper",
-             "Choose Set as Wallpaper in the main menu or the right-click menu. Image2 copies the image to "
+             "Choose Set as Wallpaper in the main menu or the right-click menu, then how it should fit: "
+             "Original Size shows the image at its actual size, centred; Zoom to Fill enlarges it to cover "
+             "the screen, cropping the edges if needed; Stretch to Fill makes it exactly fill the screen, "
+             "distorting it if the shape differs. Image2 copies the image to "
              "~/.local/share/backgrounds and uses it for both the light and dark desktop style, so the "
              "wallpaper keeps working if you later move or delete the original."),
         ]),
@@ -752,7 +770,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Open in Editor", "win.edit")
         section.append("Open With…", "win.open-with")
-        section.append("Set as Wallpaper", "win.wallpaper")
+        section.append_submenu("Set as Wallpaper", wallpaper_menu())
         menu.append_section(None, section)
         section = Gio.Menu()
         section.append("Fullscreen", "win.fullscreen")
@@ -798,7 +816,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Open in Editor", "win.edit")
         section.append("Open With…", "win.open-with")
-        section.append("Set as Wallpaper", "win.wallpaper")
+        section.append_submenu("Set as Wallpaper", wallpaper_menu())
         file_menu.append_section(None, section)
         section = Gio.Menu()
         section.append("Copy to Folder…", "win.copy-to")
@@ -1078,7 +1096,6 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-toggle": lambda *_: self.toggle_fit(),
             "edit": self.on_edit,
             "open-with": self.on_open_with,
-            "wallpaper": self.on_set_wallpaper,
             "copy-to": lambda *_: self.on_transfer(move=False),
             "move-to": lambda *_: self.on_transfer(move=True),
             "rename": self.on_rename,
@@ -1089,9 +1106,10 @@ class ImageWindow(Adw.ApplicationWindow):
             "add-folder": self.on_add_folder,
             "pin-current": lambda *_: self.pin_folders([self.folder]) or self.toast("Folder is already pinned"),
         }
-        # Folder context-menu actions take the folder path as their parameter
+        # Actions with a string parameter: a folder path, or for wallpaper a style
         folder_actions = {
             "folder-open": lambda a, p: self.open_path(p.get_string()),
+            "wallpaper": lambda a, p: self.on_set_wallpaper(p.get_string()),
             "folder-show": lambda a, p: Gtk.FileLauncher(
                 file=Gio.File.new_for_path(p.get_string())).launch(self, None, None),
             "move-here": lambda a, p: self._transfer(self.targets(), p.get_string(), True),
@@ -1549,7 +1567,7 @@ class ImageWindow(Adw.ApplicationWindow):
 
     # ---------------------------------------------------- file operations ---
 
-    def on_set_wallpaper(self, *_):
+    def on_set_wallpaper(self, style):
         path = self.current_path
         if not path:
             return
@@ -1582,9 +1600,9 @@ class ImageWindow(Adw.ApplicationWindow):
             background.set_string("picture-uri", uri)
             if schema.has_key("picture-uri-dark"):
                 background.set_string("picture-uri-dark", uri)
-            background.set_string("picture-options", "zoom")
+            background.set_string("picture-options", style)
             Gio.Settings.sync()
-            self.toast("Set as wallpaper")
+            self.toast(f"Set as wallpaper ({WALLPAPER_STYLES[style]})")
 
         run_in_thread(work, done)
 
