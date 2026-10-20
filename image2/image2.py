@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Imagery — a simple image viewer for GNOME, built with GTK 4 and libadwaita."""
+"""Image2 — a simple image viewer for GNOME, built with GTK 4 and libadwaita."""
 
 import json
 import math
@@ -18,8 +18,8 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gsk, Gtk, Pango
 
-APP_ID = "io.github.imagery.Viewer"
-APP_NAME = "Imagery"
+APP_ID = "io.github.imagery.Image2"
+APP_NAME = "Image2"
 VERSION = "1.0"
 
 THUMB_SIZE = 40
@@ -149,7 +149,7 @@ class Settings(GObject.Object):
 
     def __init__(self):
         super().__init__()
-        self.path = os.path.join(GLib.get_user_config_dir(), "imagery", "settings.json")
+        self.path = os.path.join(GLib.get_user_config_dir(), "image2", "settings.json")
         self.values = dict(self.DEFAULTS)
         # On first run, pin the Pictures folder so the Folders section isn't empty.
         pictures = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES)
@@ -603,7 +603,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Fullscreen", "win.fullscreen")
         section.append("Preferences", "app.preferences")
-        section.append("About Imagery", "app.about")
+        section.append("About Image2", "app.about")
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
                                        tooltip_text="Main Menu"))

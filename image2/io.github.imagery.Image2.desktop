@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=Imagery
+Name=Image2
 Comment=View and organise images
 Exec=@EXEC@ %U
 Icon=image-x-generic
