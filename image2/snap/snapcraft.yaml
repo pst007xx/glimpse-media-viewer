@@ -1,10 +1,10 @@
 name: image2-viewer
 base: core24
 version: '1.0'
-title: Image2
+title: Image2-Viewer
 summary: View and organise your images
 description: |
-  Image2 is a simple image viewer and organiser that fits right into GNOME.
+  Image2-Viewer is a simple image viewer and organiser that fits right into GNOME.
 
   * Browse every image in a folder, with thumbnails in the sidebar
   * Zoom with buttons, keyboard, Ctrl+scroll or pinch

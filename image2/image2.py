@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Image2 — a simple image viewer for GNOME, built with GTK 4 and libadwaita."""
+"""Image2-Viewer — a simple image viewer for GNOME, built with GTK 4 and libadwaita."""
 
 import filecmp
 import json
@@ -7,6 +7,8 @@ import math
 import os
 import sys
 import threading
+import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from xml.sax.saxutils import escape as xml_escape
 
@@ -21,7 +23,7 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gsk, Gtk, Pango
 
 APP_ID = "io.github.imagery.Image2"
-APP_NAME = "Image2"
+APP_NAME = "Image2-Viewer"
 VERSION = "1.0"
 
 THUMB_SIZE = 40
@@ -92,7 +94,7 @@ HELP = [
         ("Opening Images", [
             ("Open an image or folder",
              "Use the open button (Ctrl+O), Open Folder… in the main menu (Ctrl+Shift+O), drag an image "
-             "or folder onto the window, or choose Image2 under Open With… in Files."),
+             "or folder onto the window, or choose Image2-Viewer under Open With… in Files."),
             ("Browse the folder",
              "Every image in the opened image's folder is listed in the sidebar. Use the arrow buttons, "
              "Left/Right, Page Up/Down or Space/Backspace to step through them, Home/End for first/last."),
@@ -116,7 +118,7 @@ HELP = [
         ("Pinned Folders", [
             ("Pin folders",
              "Click + above Folders, choose Pin Current Folder to Sidebar in the main menu, or drag folders "
-             "from Files onto the Folders list. Your Pictures folder is pinned the first time Image2 starts."),
+             "from Files onto the Folders list. Your Pictures folder is pinned the first time Image2-Viewer starts."),
             ("Browse subfolders", "Expand a folder with its arrow; click any folder to show its images."),
             ("Folder menu",
              "Right-click a folder to open it, show it in Files, move or copy the selected images into it, "
@@ -145,7 +147,7 @@ HELP = [
             ("Choose an editor",
              "In Preferences, pick an installed graphics app or enter a custom command such as “gimp %f”."),
             ("Open in the editor",
-             "Press Ctrl+E or use the edit button. When the editor saves, Image2 reloads the image automatically."),
+             "Press Ctrl+E or use the edit button. When the editor saves, Image2-Viewer reloads the image automatically."),
             ("Other apps", "Open With… lets you pick any installed app for the current image."),
         ]),
         ("Wallpaper", [
@@ -153,14 +155,14 @@ HELP = [
              "Choose Set as Wallpaper in the main menu or the right-click menu, then how it should fit: "
              "Original Size shows the image at its actual size, centred; Zoom to Fill enlarges it to cover "
              "the screen, cropping the edges if needed; Stretch to Fill makes it exactly fill the screen, "
-             "distorting it if the shape differs. Image2 copies the image to "
+             "distorting it if the shape differs. Image2-Viewer copies the image to "
              "~/.local/share/backgrounds and uses it for both the light and dark desktop style, so the "
              "wallpaper keeps working if you later move or delete the original."),
         ]),
         ("Preferences", [
             ("Image list", "Turn thumbnails on or off, show hidden files, and sort by name or date modified."),
             ("Supported formats",
-             "Image2 opens every format your system's image loaders support, such as JPEG, PNG, WebP, AVIF, "
+             "Image2-Viewer opens every format your system's image loaders support, such as JPEG, PNG, WebP, AVIF, "
              "HEIC, TIFF, GIF, SVG and BMP."),
         ]),
     ]),
@@ -318,6 +320,46 @@ def portal_open(window, path, directory=False, on_error=None):
         "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI",
         method, GLib.Variant("(sha{sv})", ("", index, options)), GLib.VariantType("(o)"),
         Gio.DBusCallFlags.NONE, -1, fds, None, done)
+
+
+def trash_on_drive(path):
+    """Move path into its drive's own .Trash-UID folder (freedesktop Trash spec).
+
+    In the Snap, GLib trashes through the Trash portal, which refuses files on some
+    external drives (e.g. NTFS). This does what GLib does outside the Snap; GNOME
+    Files shows these files in its Trash as usual.
+    """
+    real = os.path.realpath(path)
+    top = os.path.dirname(real)
+    while not os.path.ismount(top):
+        top = os.path.dirname(top)
+    if top == "/":
+        raise OSError("not on an external drive")
+    trash = os.path.join(top, f".Trash-{os.getuid()}")
+    files, info = os.path.join(trash, "files"), os.path.join(trash, "info")
+    os.makedirs(files, mode=0o700, exist_ok=True)
+    os.makedirs(info, mode=0o700, exist_ok=True)
+    # Claim a free name by creating its .trashinfo exclusively, as the spec asks.
+    name = os.path.basename(real)
+    stem, ext = os.path.splitext(name)
+    n = 1
+    while True:
+        info_path = os.path.join(info, name + ".trashinfo")
+        try:
+            fd = os.open(info_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            name = f"{stem}.{n}{ext}"
+            n += 1
+    with os.fdopen(fd, "w") as f:
+        f.write("[Trash Info]\n"
+                f"Path={urllib.parse.quote(os.path.relpath(real, top))}\n"
+                f"DeletionDate={time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+    try:
+        os.rename(real, os.path.join(files, name))
+    except OSError:
+        os.unlink(info_path)
+        raise
 
 
 def show_folder(window, path):
@@ -828,7 +870,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Keyboard Shortcuts", "app.shortcuts")
         section.append("Help", "app.help")
-        section.append("About Image2", "app.about")
+        section.append("About Image2-Viewer", "app.about")
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
                                        tooltip_text="Main Menu"))
@@ -1854,16 +1896,23 @@ class ImageWindow(Adw.ApplicationWindow):
 
     def _delete(self, paths, use_trash):
         def work():
-            errors = []
+            errors = []  # (message, trash not supported)
             for path in paths:
                 file = Gio.File.new_for_path(path)
                 try:
                     if use_trash:
-                        file.trash(None)
+                        try:
+                            file.trash(None)
+                        except GLib.Error:
+                            if not IN_SNAP:
+                                raise
+                            trash_on_drive(path)
                     else:
                         file.delete(None)
                 except GLib.Error as e:
-                    errors.append(e)
+                    errors.append((e.message, e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_SUPPORTED)))
+                except OSError as e:
+                    errors.append((e.strerror or str(e), False))
             return errors
 
         def finished(errors, error):
@@ -1873,8 +1922,12 @@ class ImageWindow(Adw.ApplicationWindow):
             if error is not None:
                 message = f"Delete failed: {error}"
             elif errors:
-                message += f" — {len(errors)} failed: {errors[0].message}"
-                if use_trash and errors[0].matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_SUPPORTED):
+                reason, not_supported = errors[0]
+                if removed:
+                    message += f" — {len(errors)} failed: {reason}"
+                else:
+                    message = f"Couldn't {'move to the trash' if use_trash else 'delete'}: {reason}"
+                if use_trash and not_supported:
                     message += " (turn off “Move to Trash” in Preferences to delete permanently)"
             self.toast(message, timeout=5)
             self.rescan()
