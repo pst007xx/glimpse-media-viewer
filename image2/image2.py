@@ -293,11 +293,16 @@ def find_app(app_id):
 IN_SNAP = "SNAP" in os.environ
 
 
+_portal_requests = 0
+
+
 def portal_open(window, path, directory=False, on_error=None):
     """Open path in a host app (asking which) or its folder in Files, via the OpenURI portal."""
+    global _portal_requests
     try:
         fds = Gio.UnixFDList.new()
-        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        # Not O_PATH: the portal answers an O_PATH fd with an error and shows nothing
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
         try:
             index = fds.append(fd)
         finally:
@@ -306,20 +311,38 @@ def portal_open(window, path, directory=False, on_error=None):
         if on_error:
             on_error(str(e))
         return
-    method = "OpenDirectory" if directory else "OpenFile"
-    options = {} if directory else {"ask": GLib.Variant("b", True)}
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    _portal_requests += 1
+    token = f"image2_{_portal_requests}"
+    options = {"handle_token": GLib.Variant("s", token)}
+    if not directory:
+        options["ask"] = GLib.Variant("b", True)
+
+    # The portal reports failure later, on the request object, so listen there first.
+    sender = bus.get_unique_name()[1:].replace(".", "_")
+    handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+
+    def on_response(conn, _sender, _path, _iface, _signal, params):
+        conn.signal_unsubscribe(subscription)
+        if params.unpack()[0] == 2 and on_error:  # 1 is the user cancelling
+            on_error("no app could open it")
+
+    subscription = bus.signal_subscribe(
+        "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request", "Response", handle,
+        None, Gio.DBusSignalFlags.NONE, on_response)
 
     def done(bus, result):
         try:
             bus.call_with_unix_fd_list_finish(result)
         except GLib.Error as e:
+            bus.signal_unsubscribe(subscription)
             if on_error:
                 on_error(e.message)
 
-    Gio.bus_get_sync(Gio.BusType.SESSION, None).call_with_unix_fd_list(
+    bus.call_with_unix_fd_list(
         "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI",
-        method, GLib.Variant("(sha{sv})", ("", index, options)), GLib.VariantType("(o)"),
-        Gio.DBusCallFlags.NONE, -1, fds, None, done)
+        "OpenDirectory" if directory else "OpenFile", GLib.Variant("(sha{sv})", ("", index, options)),
+        GLib.VariantType("(o)"), Gio.DBusCallFlags.NONE, -1, fds, None, done)
 
 
 def trash_on_drive(path):
