@@ -22,6 +22,17 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gsk, Gtk, Pango
 
+try:
+    gi.require_version("GExiv2", "0.10")
+    from gi.repository import GExiv2
+except (ValueError, ImportError):
+    GExiv2 = None  # Properties then shows file details only, without camera info or tags
+else:
+    GExiv2.initialize()
+
+# exiv2's XMP support isn't safe to use from several threads at once
+METADATA_LOCK = threading.Lock()
+
 APP_ID = "io.github.imagery.Image2"
 APP_NAME = "Image2-Viewer"
 VERSION = "1.0"
@@ -88,6 +99,7 @@ SHORTCUTS = [
         ("Copy to pinned folder 1–9", "<Control><Alt>1...<Control><Alt>9"),
         ("Rename", "F2"),
         ("Delete", "Delete"),
+        ("Properties and tags", "<Alt>Return"),
     ]),
 ]
 
@@ -152,6 +164,18 @@ HELP = [
              "Image2-Viewer reloads the image automatically."),
             ("Open Containing Folder", "Shows the current image in your file manager."),
         ]),
+        ("Properties & Tags", [
+            ("See an image's details",
+             "Use the properties button or press Alt+Enter for the file's size, dimensions and dates, and "
+             "camera details such as exposure, aperture and ISO when the photo has them."),
+            ("Tag images",
+             "In Properties, type tags and press Enter; separate several with commas. Remove one with its "
+             "× button. Tags are saved inside the image as standard keywords, so other photo apps such as "
+             "darktable, digiKam and Shotwell can read them."),
+            ("Show and sort by tag",
+             "Each image's tags appear under its name. Use the menu next to Images to show only the images "
+             "with one tag, or the untagged ones, and to sort by name, date modified or tag."),
+        ]),
         ("Wallpaper", [
             ("Set as wallpaper",
              "Choose Set as Wallpaper in the main menu or the right-click menu, then how it should fit: "
@@ -162,7 +186,7 @@ HELP = [
              "wallpaper keeps working if you later move or delete the original."),
         ]),
         ("Preferences", [
-            ("Image list", "Turn thumbnails on or off, show hidden files, and sort by name or date modified."),
+            ("Image list", "Turn thumbnails on or off, show hidden files, and sort by name, date modified or tag."),
             ("Supported formats",
              "Image2-Viewer opens every format your system's image loaders support, such as JPEG, PNG, WebP, AVIF, "
              "HEIC, TIFF, GIF, SVG and BMP."),
@@ -364,6 +388,103 @@ def trash_on_drive(path):
         raise
 
 
+# Keywords as photo apps store them: XMP first, then the older IPTC field
+TAG_KEYS = ("Xmp.dc.subject", "Iptc.Application2.Keywords")
+
+
+def open_metadata(path):
+    """GExiv2 metadata for path, or None if GExiv2 is missing or can't read the file."""
+    if GExiv2 is None:
+        return None
+    metadata = GExiv2.Metadata()
+    try:
+        with METADATA_LOCK:
+            metadata.open_path(path)
+    except GLib.Error:
+        return None
+    return metadata
+
+
+def read_tags(metadata):
+    tags = []
+    for key in TAG_KEYS:
+        try:
+            values = metadata.try_get_tag_multiple(key) if metadata.try_has_tag(key) else []
+        except GLib.Error:
+            continue
+        for tag in values or []:
+            tag = tag.strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+    return tags
+
+
+def write_tags(path, tags):
+    """Save tags as XMP keywords, and as IPTC keywords too if the file already has those."""
+    with METADATA_LOCK:
+        _write_tags(path, tags)
+
+
+def _write_tags(path, tags):
+    metadata = GExiv2.Metadata()
+    metadata.open_path(path)
+    if not metadata.get_supports_xmp():
+        raise OSError("this file type can't hold tags")
+    keys = ["Xmp.dc.subject"]
+    if metadata.get_supports_iptc() and metadata.try_has_tag("Iptc.Application2.Keywords"):
+        keys.append("Iptc.Application2.Keywords")
+    for key in keys:
+        if tags:
+            metadata.try_set_tag_multiple(key, tags)
+        elif metadata.try_has_tag(key):
+            metadata.try_clear_tag(key)
+    metadata.save_file(path)
+
+
+def camera_details(metadata):
+    """[(label, value)] for the EXIF details worth showing, skipping missing ones."""
+    def text(key):
+        try:
+            if metadata.try_has_tag(key):
+                return (metadata.try_get_tag_interpreted_string(key) or "").strip()
+        except GLib.Error:
+            pass
+        return ""
+
+    def number(getter):
+        try:
+            return getter()
+        except GLib.Error:
+            return None
+
+    rows = []
+    taken = text("Exif.Photo.DateTimeOriginal") or text("Exif.Image.DateTime")
+    try:
+        date, clock = taken.split(" ", 1)
+        stamp = GLib.DateTime.new_local(*map(int, date.split(":")), *map(int, clock.split(":")))
+        taken = stamp.format("%-d %B %Y, %H:%M:%S") if stamp else taken
+    except ValueError:
+        pass
+    rows.append(("Date Taken", taken))
+    make, model = text("Exif.Image.Make"), text("Exif.Image.Model")
+    rows.append(("Camera", model if model.lower().startswith(make.lower()) else f"{make} {model}".strip()))
+    rows.append(("Lens", text("Exif.Photo.LensModel")))
+    if metadata.try_has_tag("Exif.Photo.ExposureTime") and (exposure := number(metadata.try_get_exposure_time)):
+        num, den = exposure
+        if num and den:
+            rows.append(("Exposure", f"1/{round(den / num)} s" if num < den else f"{num / den:g} s"))
+    if metadata.try_has_tag("Exif.Photo.FNumber") and (fnumber := number(metadata.try_get_fnumber)):
+        rows.append(("Aperture", f"f/{fnumber:g}"))
+    if iso := number(metadata.try_get_iso_speed):
+        rows.append(("ISO", str(iso)))
+    if metadata.try_has_tag("Exif.Photo.FocalLength") and (focal := number(metadata.try_get_focal_length)):
+        rows.append(("Focal Length", f"{focal:g} mm"))
+    rows.append(("Flash", text("Exif.Photo.Flash")))
+    if metadata.try_has_tag("Exif.GPSInfo.GPSLatitude") and (gps := number(metadata.try_get_gps_info)):
+        rows.append(("Location", f"{gps[1]:.5f}, {gps[0]:.5f}"))
+    return [(label, value) for label, value in rows if value]
+
+
 def show_containing_folder(window, path):
     """Open the folder holding path in the file manager, with path selected."""
     if IN_SNAP:
@@ -402,7 +523,7 @@ class Settings(GObject.Object):
         "confirm_delete": True,
         "show_thumbnails": True,
         "show_hidden": False,
-        "sort_by": "name",              # name | date
+        "sort_by": "name",              # name | date | tag
         "last_target_folder": "",
         "last_folder": "",
         "folders": [],                  # folders pinned in the sidebar
@@ -451,6 +572,7 @@ class ImageItem(GObject.Object):
         self.display_name = GLib.filename_display_name(self.name)
         self.mtime = mtime
         self.size = size
+        self.tags = None  # filled in from TagCache; None until read
 
 
 def scan_folder(folder, sort_by, show_hidden):
@@ -478,6 +600,78 @@ def scan_folder(folder, sort_by, show_hidden):
     else:
         items.sort(key=name_key)
     return items
+
+
+SORT_OPTIONS = [("name", "Name"), ("date", "Date Modified"), ("tag", "Tag")]
+UNTAGGED = "\x01untagged"  # tag-filter value for images without tags; can't be a real tag
+
+
+def sort_by_tag(items):
+    """Group images under their alphabetically first tag; untagged ones go last. Keeps name order within."""
+    def key(item):
+        tags = sorted(t.casefold() for t in item.tags or [])
+        return (0, tags[0]) if tags else (1, "")
+    return sorted(items, key=key)
+
+
+class TagCache:
+    """Tags of each image, read in the background and kept per (path, mtime).
+
+    Saved between runs, since reading thousands of photos from a USB drive takes a while.
+    """
+
+    def __init__(self):
+        self.path = os.path.join(GLib.get_user_cache_dir(), "image2", "tags.json")
+        self.cache = {}
+        self.generation = 0
+        try:
+            with open(self.path) as f:
+                for path, mtime, tags in json.load(f):
+                    self.cache[(path, mtime)] = tags
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def save(self):
+        latest = {}  # one entry per file: an edited file's older entries are dropped
+        for (path, mtime), tags in self.cache.items():
+            if path not in latest or mtime > latest[path][0]:
+                latest[path] = (mtime, tags)
+        self.cache = {(path, mtime): tags for path, (mtime, tags) in latest.items()}
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path + ".tmp", "w") as f:
+                json.dump([[path, mtime, tags] for (path, mtime), tags in self.cache.items()], f)
+            os.replace(self.path + ".tmp", self.path)
+        except OSError:
+            pass
+
+    def lookup(self, item):
+        return self.cache.get((item.path, item.mtime))
+
+    def load(self, items, done):
+        """Read the tags of items not cached yet, then call done() unless a newer load started."""
+        self.generation += 1
+        generation = self.generation
+        keys = [(i.path, i.mtime) for i in items if (i.path, i.mtime) not in self.cache]
+
+        def work():
+            found = {}
+            for key in keys:
+                if generation != self.generation:
+                    break
+                metadata = open_metadata(key[0])
+                with METADATA_LOCK:
+                    found[key] = read_tags(metadata) if metadata else []
+            return found
+
+        def finished(found, error):
+            if found:
+                self.cache.update(found)
+                self.save()
+            if generation == self.generation and error is None:
+                done()
+
+        run_in_thread(work, finished)
 
 
 class FolderNode(GObject.Object):
@@ -643,10 +837,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page.add(sidebar)
         sidebar.add(self._switch("Show Thumbnails", None, "show_thumbnails"))
         sidebar.add(self._switch("Show Hidden Files", None, "show_hidden"))
-        sort_row = Adw.ComboRow(title="Sort By", model=Gtk.StringList.new(["Name", "Date Modified"]))
-        sort_row.set_selected(1 if settings["sort_by"] == "date" else 0)
+        sort_row = Adw.ComboRow(title="Sort By", model=Gtk.StringList.new([label for _, label in SORT_OPTIONS]))
+        keys = [key for key, _ in SORT_OPTIONS]
+        sort_row.set_selected(keys.index(settings["sort_by"]) if settings["sort_by"] in keys else 0)
         sort_row.connect("notify::selected",
-                         lambda row, _: settings.__setitem__("sort_by", "date" if row.get_selected() else "name"))
+                         lambda row, _: settings.__setitem__("sort_by", keys[row.get_selected()]))
         sidebar.add(sort_row)
 
     def _switch(self, title, subtitle, key):
@@ -655,6 +850,108 @@ class PreferencesDialog(Adw.PreferencesDialog):
             row.set_subtitle(subtitle)
         row.connect("notify::active", lambda r, _: self.settings.__setitem__(key, r.get_active()))
         return row
+
+
+class PropertiesDialog(Adw.PreferencesDialog):
+    """File and camera details of one image, with its tags to edit."""
+
+    def __init__(self, path):
+        super().__init__(title="Properties")
+        self.path = path
+        page = Adw.PreferencesPage()
+        self.add(page)
+        metadata = open_metadata(path)
+
+        # Tags first: they're the part you edit
+        self.tags_group = Adw.PreferencesGroup(title="Tags")
+        page.add(self.tags_group)
+        self.tag_rows = []
+        if GExiv2 is None:
+            self.tags_group.set_description("Editing tags needs GExiv2 (package gir1.2-gexiv2-0.10).")
+            self.tags = None
+        elif metadata is None or not metadata.get_supports_xmp():
+            self.tags_group.set_description("This file type can't hold tags.")
+            self.tags = None
+        else:
+            self.tags_group.set_description("Saved in the image, so other photo apps can read them too.")
+            self.tags = read_tags(metadata)
+            self.entry = Adw.EntryRow(title="Add Tags (separate with commas)", show_apply_button=True)
+            self.entry.connect("apply", self._on_add)
+            self.entry.connect("entry-activated", self._on_add)
+            self.tags_group.add(self.entry)
+            self._show_tags()
+
+        file_group = Adw.PreferencesGroup(title="File")
+        page.add(file_group)
+        file = Gio.File.new_for_path(path)
+        try:
+            info = file.query_info("standard::content-type,standard::size,time::modified",
+                                   Gio.FileQueryInfoFlags.NONE, None)
+        except GLib.Error:
+            info = None
+        rows = [("Name", GLib.filename_display_basename(path)),
+                ("Folder", GLib.filename_display_name(os.path.dirname(path)))]
+        if info:
+            rows.append(("Type", Gio.content_type_get_description(info.get_content_type() or "")))
+            rows.append(("Size", GLib.format_size(info.get_size())))
+        fmt = GdkPixbuf.Pixbuf.get_file_info(path)
+        if fmt and fmt[0] and fmt[1] > 0:
+            rows.append(("Dimensions", f"{fmt[1]} × {fmt[2]} pixels"))
+        if info and (modified := info.get_modification_date_time()):
+            rows.append(("Modified", modified.to_local().format("%-d %B %Y, %H:%M")))
+        for label, value in rows:
+            file_group.add(self._property(label, value))
+
+        details = camera_details(metadata) if metadata else []
+        if details:
+            camera = Adw.PreferencesGroup(title="Camera")
+            page.add(camera)
+            for label, value in details:
+                camera.add(self._property(label, value))
+
+    @staticmethod
+    def _property(label, value):
+        row = Adw.ActionRow(title=label, subtitle=GLib.markup_escape_text(value), subtitle_selectable=True)
+        row.add_css_class("property")
+        return row
+
+    def _show_tags(self):
+        for row in self.tag_rows:
+            self.tags_group.remove(row)
+        self.tag_rows = []
+        for tag in self.tags:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(tag))
+            remove = Gtk.Button(icon_name="window-close-symbolic", valign=Gtk.Align.CENTER,
+                                tooltip_text="Remove Tag", css_classes=["flat"])
+            remove.connect("clicked", lambda _, t=tag: self._save([x for x in self.tags if x != t]))
+            row.add_suffix(remove)
+            self.tags_group.add(row)
+            self.tag_rows.append(row)
+
+    def _on_add(self, entry):
+        tags = list(self.tags)
+        for tag in entry.get_text().split(","):
+            tag = tag.strip()
+            if tag and tag.casefold() not in {t.casefold() for t in tags}:
+                tags.append(tag)
+        entry.set_text("")
+        if tags != self.tags:
+            self._save(tags)
+
+    def _save(self, tags):
+        self.tags_group.set_sensitive(False)
+
+        def done(_, error):
+            self.tags_group.set_sensitive(True)
+            if error is not None:
+                message = error.message if isinstance(error, GLib.Error) else str(error)
+                self.add_toast(Adw.Toast(title=GLib.markup_escape_text(f"Couldn't save tags: {message}")))
+                return
+            self.tags = tags
+            self._show_tags()
+            self.entry.grab_focus()
+
+        run_in_thread(lambda: write_tags(self.path, tags), done)
 
 
 # ----------------------------------------------------------------------------
@@ -667,8 +964,11 @@ class ImageWindow(Adw.ApplicationWindow):
         self.set_size_request(360, 300)
         self.settings = app.settings
         self.thumbs = app.thumbs
+        self.tag_cache = app.tag_cache
 
         self.folder = None
+        self.tag_filter = ""  # "" for all images, a tag, or UNTAGGED
+        self.tags_loading = False
         self.monitor = None
         self.rescan_source = 0
         self.current_path = None
@@ -740,8 +1040,12 @@ class ImageWindow(Adw.ApplicationWindow):
             [f.get_path() for f in value.get_files() if f.get_path()]) > 0)
         folders_box.add_controller(pin_drop)
 
-        images_header = Gtk.Label(label="Images", xalign=0, margin_start=12, margin_top=6,
-                                  css_classes=["heading"])
+        images_header = Gtk.Box(margin_start=12, margin_end=6, margin_top=6)
+        images_header.append(Gtk.Label(label="Images", xalign=0, hexpand=True, css_classes=["heading"]))
+        self.tag_menu = Gio.Menu()
+        self.view_button = Gtk.MenuButton(label="All", menu_model=self.tag_menu, css_classes=["flat"],
+                                          always_show_arrow=True, tooltip_text="Show and Sort Images")
+        images_header.append(self.view_button)
         images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=120)
         images_box.append(images_header)
         images_box.append(list_scroller)
@@ -817,6 +1121,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Open With…", "win.open-with")
         section.append("Open Containing Folder", "win.show-containing")
+        section.append("Properties", "win.properties")
         section.append_submenu("Set as Wallpaper", wallpaper_menu())
         menu.append_section(None, section)
         section = Gio.Menu()
@@ -830,6 +1135,8 @@ class ImageWindow(Adw.ApplicationWindow):
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
                                        tooltip_text="Main Menu"))
+        header.pack_end(Gtk.Button(icon_name="document-properties-symbolic", action_name="win.properties",
+                                   tooltip_text="Properties (Alt+Enter)"))
 
         zoom = Gtk.Box(css_classes=["linked"])
         zoom.append(Gtk.Button(icon_name="zoom-out-symbolic", action_name="win.zoom-out",
@@ -861,6 +1168,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Open With…", "win.open-with")
         section.append("Open Containing Folder", "win.show-containing")
+        section.append("Properties", "win.properties")
         section.append_submenu("Set as Wallpaper", wallpaper_menu())
         file_menu.append_section(None, section)
         section = Gio.Menu()
@@ -886,10 +1194,14 @@ class ImageWindow(Adw.ApplicationWindow):
     def _row_setup(self, factory, list_item):
         box = Gtk.Box(spacing=10)
         box.thumb = Gtk.Image(pixel_size=THUMB_SIZE)
-        box.label = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        box.label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        box.tags = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["dim-label", "caption"])
         box.item = None
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        text.append(box.label)
+        text.append(box.tags)
         box.append(box.thumb)
-        box.append(box.label)
+        box.append(text)
         click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
         click.connect("pressed", self._on_row_context, list_item, box)
         box.add_controller(click)
@@ -912,7 +1224,9 @@ class ImageWindow(Adw.ApplicationWindow):
         item = list_item.get_item()
         box.item = item
         box.label.set_label(item.display_name)
-        box.set_tooltip_text(item.display_name)
+        box.tags.set_label(", ".join(item.tags or []))
+        box.tags.set_visible(bool(item.tags))
+        box.set_tooltip_text(item.display_name + (f"\n{', '.join(item.tags)}" if item.tags else ""))
         show = self.settings["show_thumbnails"]
         box.thumb.set_visible(show)
         if not show:
@@ -1141,6 +1455,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-toggle": lambda *_: self.toggle_fit(),
             "open-with": self.on_open_with,
             "show-containing": lambda *_: show_containing_folder(self, self.current_path),
+            "properties": lambda *_: PropertiesDialog(self.current_path).present(self),
             "copy-to": lambda *_: self.on_transfer(move=False),
             "move-to": lambda *_: self.on_transfer(move=True),
             "rename": self.on_rename,
@@ -1169,6 +1484,15 @@ class ImageWindow(Adw.ApplicationWindow):
                 action.connect("activate", callback)
                 self.add_action(action)
                 self.actions[name] = action
+
+        # Radio choices in the Images menu
+        tag_filter = Gio.SimpleAction.new_stateful("tag-filter", GLib.VariantType.new("s"), GLib.Variant("s", ""))
+        tag_filter.connect("change-state", lambda a, value: self.set_tag_filter(value.get_string()))
+        self.add_action(tag_filter)
+        sort_by = Gio.SimpleAction.new_stateful("sort-by", GLib.VariantType.new("s"),
+                                                GLib.Variant("s", self.settings["sort_by"]))
+        sort_by.connect("change-state", lambda a, value: self.settings.__setitem__("sort_by", value.get_string()))
+        self.add_action(sort_by)
 
     def _install_input(self):
         # Plain keys are handled here, in the capture phase, so they work whatever
@@ -1337,6 +1661,7 @@ class ImageWindow(Adw.ApplicationWindow):
             return
         if folder != self.folder:
             self.folder = folder
+            self.set_tag_filter("", rescan=False)
             self.current_path = None
             self.path_index = {}
             self._watch_folder()
@@ -1371,6 +1696,21 @@ class ImageWindow(Adw.ApplicationWindow):
         keep = [] if select_path else self.selected_paths()
         old_index = self.path_index.get(self.current_path, 0)
         items = scan_folder(self.folder, self.settings["sort_by"], self.settings["show_hidden"])
+        total = len(items)
+        unknown = False
+        for item in items:
+            item.tags = self.tag_cache.lookup(item)
+            unknown = unknown or item.tags is None
+        self.tags_loading = unknown and GExiv2 is not None
+        if self.tags_loading:
+            self.tag_cache.load(items, self.rescan)
+        elif self.tag_filter and not self._filter_matches_any(items):
+            self.set_tag_filter("", rescan=False)  # its last image lost the tag, or moved away
+        self._update_tag_menu(items)
+        if self.tag_filter:
+            items = [i for i in items if self._matches_filter(i)]
+        if self.settings["sort_by"] == "tag":
+            items = sort_by_tag(items)
 
         self.updating = True
         try:
@@ -1380,7 +1720,8 @@ class ImageWindow(Adw.ApplicationWindow):
         self.path_index = {item.path: i for i, item in enumerate(items)}
 
         self.sidebar_title.set_title(GLib.filename_display_basename(self.folder))
-        self.sidebar_title.set_subtitle(plural(len(items), "image"))
+        count = f"{len(items)} of {plural(total, 'image')}" if self.tag_filter else plural(total, "image")
+        self.sidebar_title.set_subtitle(count + (" · reading tags…" if self.tags_loading else ""))
 
         if not items:
             self.current_path = None
@@ -1406,6 +1747,56 @@ class ImageWindow(Adw.ApplicationWindow):
         self.listview.scroll_to(self.path_index[target], Gtk.ListScrollFlags.NONE, None)
         self.display(target)
         self.update_actions()
+
+    # --------------------------------------------------------------- tags ---
+
+    def _matches_filter(self, item):
+        if self.tag_filter == UNTAGGED:
+            return not item.tags
+        wanted = self.tag_filter.casefold()
+        return any(t.casefold() == wanted for t in item.tags or [])
+
+    def _filter_matches_any(self, items):
+        return any(self._matches_filter(i) for i in items)
+
+    def set_tag_filter(self, value, rescan=True):
+        self.tag_filter = value
+        self.lookup_action("tag-filter").set_state(GLib.Variant("s", value))
+        label = {"": "All", UNTAGGED: "Untagged"}.get(value, value)
+        self.view_button.set_label(label)
+        self.view_button.set_tooltip_text("Show and Sort Images" if not value else f"Showing: {label}")
+        if rescan:
+            self.rescan()
+
+    def _update_tag_menu(self, items):
+        """Rebuild the Images menu: All, Untagged and each tag in this folder with its count, then Sort By."""
+        counts, names = {}, {}
+        untagged = 0
+        for item in items:
+            if not item.tags:
+                untagged += item.tags is not None
+            for tag in {t.casefold(): t for t in item.tags or []}.items():
+                counts[tag[0]] = counts.get(tag[0], 0) + 1
+                names.setdefault(tag[0], tag[1])
+        self.tag_menu.remove_all()
+        show = Gio.Menu()
+        show.append(f"All Images ({len(items)})", "win.tag-filter::")
+        if counts and untagged:
+            show.append_item(self._menu_item(f"Untagged ({untagged})", "tag-filter", UNTAGGED))
+        for key in sorted(counts, key=lambda k: GLib.utf8_collate_key(k, -1)):
+            show.append_item(self._menu_item(f"{names[key]} ({counts[key]})", "tag-filter", names[key]))
+        self.tag_menu.append_section("Show", show)
+        sort = Gio.Menu()
+        for key, label in SORT_OPTIONS:
+            sort.append_item(self._menu_item(label, "sort-by", key))
+        self.tag_menu.append_section("Sort By", sort)
+
+    @staticmethod
+    def _menu_item(label, action, value):
+        # Built with a Variant target, so tags with odd characters can't break a detailed action name
+        item = Gio.MenuItem.new(label, None)
+        item.set_action_and_target_value(f"win.{action}", GLib.Variant("s", value))
+        return item
 
     # ---------------------------------------------------------- selection ---
 
@@ -1509,6 +1900,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-toggle": has_image,
             "open-with": self.current_path is not None,
             "show-containing": self.current_path is not None,
+            "properties": self.current_path is not None,
             "wallpaper": has_image,
             "copy-to": bool(targets),
             "move-to": bool(targets),
@@ -1861,6 +2253,8 @@ class ImageWindow(Adw.ApplicationWindow):
     # -------------------------------------------------------------- misc ---
 
     def _on_settings_changed(self, settings, key):
+        if key == "sort_by":
+            self.lookup_action("sort-by").set_state(GLib.Variant("s", settings["sort_by"]))
         if key in ("sort_by", "show_hidden", "show_thumbnails"):
             self.rescan()
         if key in ("folders", "show_hidden"):
@@ -1891,12 +2285,14 @@ class Application(Adw.Application):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.settings = None
         self.thumbs = None
+        self.tag_cache = None
 
     def do_startup(self):
         Adw.Application.do_startup(self)
         GLib.set_application_name(APP_NAME)
         self.settings = Settings()
         self.thumbs = ThumbnailCache()
+        self.tag_cache = TagCache()
         # Running from the source folder: find the app icon in ./icons
         icons = os.path.join(os.path.dirname(os.path.realpath(__file__)), "icons")
         if os.path.isdir(icons):
@@ -1931,6 +2327,7 @@ class Application(Adw.Application):
             "win.copy-to": ["<Control><Shift>c"],
             "win.move-to": ["<Control><Shift>m"],
             "win.rename": ["F2"],
+            "win.properties": ["<Alt>Return", "<Alt>KP_Enter"],
             "win.toggle-sidebar": ["F9"],
             "win.fullscreen": ["F11"],
         }

@@ -54,6 +54,7 @@ parts:
     stage-packages:
       - python3
       - python3-gi
+      - gir1.2-gexiv2-0.10   # Properties: camera details and tags (brings libgexiv2 and libexiv2)
     override-build: |
       craftctl default
       install -Dm755 image2.py "$CRAFT_PART_INSTALL/bin/image2"
