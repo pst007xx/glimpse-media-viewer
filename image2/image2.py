@@ -169,9 +169,13 @@ HELP = [
              "Use the properties button or press Alt+Enter for the file's size, dimensions and dates, and "
              "camera details such as exposure, aperture and ISO when the photo has them."),
             ("Tag images",
-             "In Properties, type tags and press Enter; separate several with commas. Remove one with its "
-             "× button. Tags are saved inside the image as standard keywords, so other photo apps such as "
-             "darktable, digiKam and Shotwell can read them."),
+             "In Properties, type tags and press Enter; separate several with commas. Rename a tag with its "
+             "pencil button, or remove it with ×. Tags are saved inside the image as standard keywords, so "
+             "other photo apps such as darktable, digiKam and Shotwell can read them."),
+            ("Tag several images at once",
+             "Select images (Ctrl+click, Shift+click or Ctrl+A), then open Properties. Tags you add, rename or "
+             "remove change in every selected image. A tag only some of them have shows how many, and + adds "
+             "it to the rest."),
             ("Show and sort by tag",
              "Each image's tags appear under its name. Use the menu next to Images to show only the images "
              "with one tag, or the untagged ones, and to sort by name, date modified or tag."),
@@ -852,35 +856,58 @@ class PreferencesDialog(Adw.PreferencesDialog):
         return row
 
 
-class PropertiesDialog(Adw.PreferencesDialog):
-    """File and camera details of one image, with its tags to edit."""
+def edit_tags(tags, add=(), remove=(), rename=None):
+    """tags with rename=(old, new) applied, remove dropped and add appended; ignores case, no duplicates."""
+    drop = {t.casefold() for t in remove}
+    result, seen = [], set()
+    for tag in list(tags) + list(add):
+        if rename and tag.casefold() == rename[0].casefold():
+            tag = rename[1]
+        key = tag.casefold()
+        if key not in drop and key not in seen:
+            seen.add(key)
+            result.append(tag)
+    return result
 
-    def __init__(self, path):
+
+class PropertiesDialog(Adw.PreferencesDialog):
+    """Details of one image, or a summary of several, with their tags to edit."""
+
+    def __init__(self, paths, known_tags):
+        """known_tags: {path: tags} already read for the image list; missing ones are read here."""
         super().__init__(title="Properties")
-        self.path = path
+        self.paths = paths
+        self.tags = {}  # path → tags, for the images that can hold tags
         page = Adw.PreferencesPage()
         self.add(page)
-        metadata = open_metadata(path)
 
         # Tags first: they're the part you edit
         self.tags_group = Adw.PreferencesGroup(title="Tags")
         page.add(self.tags_group)
         self.tag_rows = []
+        self.entry = None
         if GExiv2 is None:
             self.tags_group.set_description("Editing tags needs GExiv2 (package gir1.2-gexiv2-0.10).")
-            self.tags = None
-        elif metadata is None or not metadata.get_supports_xmp():
-            self.tags_group.set_description("This file type can't hold tags.")
-            self.tags = None
         else:
-            self.tags_group.set_description("Saved in the image, so other photo apps can read them too.")
-            self.tags = read_tags(metadata)
-            self.entry = Adw.EntryRow(title="Add Tags (separate with commas)", show_apply_button=True)
-            self.entry.connect("apply", self._on_add)
-            self.entry.connect("entry-activated", self._on_add)
-            self.tags_group.add(self.entry)
-            self._show_tags()
+            self.tags_group.set_description("Reading tags…")
+            run_in_thread(lambda: self._read_tags(known_tags), self._on_tags_read)
 
+        if len(paths) == 1:
+            self._add_details(page, paths[0])
+        else:
+            summary = Adw.PreferencesGroup(title="Selection")
+            page.add(summary)
+            size = 0
+            for path in paths:
+                try:
+                    size += os.stat(path).st_size
+                except OSError:
+                    pass
+            summary.add(self._property("Images", str(len(paths))))
+            summary.add(self._property("Total Size", GLib.format_size(size)))
+
+    def _add_details(self, page, path):
+        metadata = open_metadata(path)
         file_group = Adw.PreferencesGroup(title="File")
         page.add(file_group)
         file = Gio.File.new_for_path(path)
@@ -915,43 +942,134 @@ class PropertiesDialog(Adw.PreferencesDialog):
         row.add_css_class("property")
         return row
 
+    # ---------------------------------------------------------------- tags
+
+    def _read_tags(self, known_tags):
+        found = {}
+        for path in self.paths:
+            tags = known_tags.get(path)
+            if tags is None or len(self.paths) == 1:  # one image: also check it can hold tags
+                metadata = open_metadata(path)
+                if metadata is None or not metadata.get_supports_xmp():
+                    continue
+                with METADATA_LOCK:
+                    tags = read_tags(metadata)
+            found[path] = list(tags)
+        return found
+
+    def _on_tags_read(self, found, error):
+        if error is not None or not found:
+            self.tags_group.set_description("These images can't hold tags." if len(self.paths) > 1
+                                            else "This file type can't hold tags.")
+            return
+        self.tags = found
+        if len(self.paths) == 1:
+            self.tags_group.set_description("Saved in the image, so other photo apps can read them too.")
+        else:
+            skipped = len(self.paths) - len(found)
+            self.tags_group.set_description(
+                f"Changes apply to all {plural(len(found), 'selected image')}."
+                + (f" {plural(skipped, 'image')} can't hold tags and won't change." if skipped else ""))
+        self.entry = Adw.EntryRow(title="Add Tags (separate with commas)", show_apply_button=True)
+        self.entry.connect("apply", self._on_add)
+        self.entry.connect("entry-activated", self._on_add)
+        self.tags_group.add(self.entry)
+        self._show_tags()
+
     def _show_tags(self):
         for row in self.tag_rows:
             self.tags_group.remove(row)
         self.tag_rows = []
-        for tag in self.tags:
+        counts, names = {}, {}
+        for tags in self.tags.values():
+            for tag in tags:
+                counts[tag.casefold()] = counts.get(tag.casefold(), 0) + 1
+                names.setdefault(tag.casefold(), tag)
+        total = len(self.tags)
+        for key in sorted(counts, key=lambda k: GLib.utf8_collate_key(k, -1)) if total > 1 else counts:
+            tag, count = names[key], counts[key]
             row = Adw.ActionRow(title=GLib.markup_escape_text(tag))
-            remove = Gtk.Button(icon_name="window-close-symbolic", valign=Gtk.Align.CENTER,
-                                tooltip_text="Remove Tag", css_classes=["flat"])
-            remove.connect("clicked", lambda _, t=tag: self._save([x for x in self.tags if x != t]))
-            row.add_suffix(remove)
+            if count < total:
+                row.set_subtitle(f"{count} of {total} images")
+                row.add_suffix(self._button("list-add-symbolic", "Add to All Selected Images",
+                                            lambda t=tag: self._apply(lambda tags: edit_tags(tags, add=[t]))))
+            row.add_suffix(self._button("document-edit-symbolic", "Rename Tag", lambda t=tag: self._ask_rename(t)))
+            row.add_suffix(self._button("window-close-symbolic", "Remove Tag",
+                                        lambda t=tag: self._apply(lambda tags: edit_tags(tags, remove=[t]))))
             self.tags_group.add(row)
             self.tag_rows.append(row)
 
-    def _on_add(self, entry):
-        tags = list(self.tags)
-        for tag in entry.get_text().split(","):
-            tag = tag.strip()
-            if tag and tag.casefold() not in {t.casefold() for t in tags}:
-                tags.append(tag)
-        entry.set_text("")
-        if tags != self.tags:
-            self._save(tags)
+    @staticmethod
+    def _button(icon, tooltip, callback):
+        button = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tooltip, css_classes=["flat"])
+        button.connect("clicked", lambda _: callback())
+        return button
 
-    def _save(self, tags):
+    def _on_add(self, entry):
+        new = [t.strip() for t in entry.get_text().split(",") if t.strip()]
+        entry.set_text("")
+        if new:
+            self._apply(lambda tags: edit_tags(tags, add=new))
+
+    def _ask_rename(self, old):
+        count = sum(any(t.casefold() == old.casefold() for t in tags) for tags in self.tags.values())
+        dialog = Adw.AlertDialog(heading="Rename Tag",
+                                 body=f"Renames “{old}” in {plural(count, 'image')}." if len(self.tags) > 1 else None)
+        entry = Gtk.Entry(text=old, activates_default=True)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "_Cancel")
+        dialog.add_response("rename", "_Rename")
+        dialog.set_response_appearance("rename", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("rename")
+        dialog.set_close_response("cancel")
+
+        def validate(*_):
+            new = entry.get_text().strip()
+            dialog.set_response_enabled("rename", bool(new) and "," not in new and new != old)
+
+        def respond(_, response):
+            if response == "rename":
+                new = entry.get_text().strip()
+                self._apply(lambda tags: edit_tags(tags, rename=(old, new)))
+
+        entry.connect("changed", validate)
+        dialog.connect("response", respond)
+        validate()
+        dialog.present(self)
+        entry.grab_focus()
+
+    def _apply(self, change):
+        """Write change(tags) to every image whose tags it alters."""
+        writes = {path: change(tags) for path, tags in self.tags.items()}
+        writes = {path: tags for path, tags in writes.items() if tags != self.tags[path]}
+        if not writes:
+            return
         self.tags_group.set_sensitive(False)
 
-        def done(_, error):
-            self.tags_group.set_sensitive(True)
-            if error is not None:
-                message = error.message if isinstance(error, GLib.Error) else str(error)
-                self.add_toast(Adw.Toast(title=GLib.markup_escape_text(f"Couldn't save tags: {message}")))
-                return
-            self.tags = tags
-            self._show_tags()
-            self.entry.grab_focus()
+        def work():
+            saved, errors = {}, []
+            for path, tags in writes.items():
+                try:
+                    write_tags(path, tags)
+                    saved[path] = tags
+                except (GLib.Error, OSError) as e:
+                    errors.append(e.message if isinstance(e, GLib.Error) else str(e))
+            return saved, errors
 
-        run_in_thread(lambda: write_tags(self.path, tags), done)
+        def done(result, error):
+            self.tags_group.set_sensitive(True)
+            saved, errors = result if result else ({}, [str(error)])
+            self.tags.update(saved)
+            self._show_tags()
+            if errors:
+                what = "" if len(writes) == 1 else f" in {plural(len(errors), 'image')}"
+                self.add_toast(Adw.Toast(title=GLib.markup_escape_text(f"Couldn't save tags{what}: {errors[0]}")))
+            elif len(saved) > 1:
+                self.add_toast(Adw.Toast(title=f"Updated {plural(len(saved), 'image')}"))
+            if self.entry:
+                self.entry.grab_focus()
+
+        run_in_thread(work, done)
 
 
 # ----------------------------------------------------------------------------
@@ -1455,7 +1573,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-toggle": lambda *_: self.toggle_fit(),
             "open-with": self.on_open_with,
             "show-containing": lambda *_: show_containing_folder(self, self.current_path),
-            "properties": lambda *_: PropertiesDialog(self.current_path).present(self),
+            "properties": self.on_properties,
             "copy-to": lambda *_: self.on_transfer(move=False),
             "move-to": lambda *_: self.on_transfer(move=True),
             "rename": self.on_rename,
@@ -1749,6 +1867,16 @@ class ImageWindow(Adw.ApplicationWindow):
         self.update_actions()
 
     # --------------------------------------------------------------- tags ---
+
+    def on_properties(self, *_):
+        paths = self.targets()
+        if not paths:
+            return
+        known = {}
+        for i in range(self.store.get_n_items()):
+            item = self.store.get_item(i)
+            known[item.path] = item.tags
+        PropertiesDialog(paths, known).present(self)
 
     def _matches_filter(self, item):
         if self.tag_filter == UNTAGGED:
