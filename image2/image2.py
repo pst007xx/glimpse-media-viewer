@@ -5,6 +5,7 @@ import filecmp
 import json
 import math
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -100,6 +101,7 @@ SHORTCUTS = [
         ("Rename", "F2"),
         ("Delete", "Delete"),
         ("Properties and tags", "<Alt>Return"),
+        ("Find images by tag", "<Control>f"),
     ]),
 ]
 
@@ -176,6 +178,12 @@ HELP = [
              "Select images (Ctrl+click, Shift+click or Ctrl+A), then open Properties. Tags you add, rename or "
              "remove change in every selected image. A tag only some of them have shows how many, and + adds "
              "it to the rest."),
+            ("Find by tag in all folders",
+             "Press Ctrl+F or use the search button by Folders, tick one or more tags, choose whether images "
+             "need any or all of them, then Show Images. The list then holds every matching image from your "
+             "pinned folders and their subfolders, with each image's folder under its name. Click a folder, "
+             "or the × by Images, to go back. The first search on a big collection indexes it in the "
+             "background, which can take a while; after that only new and changed images are read."),
             ("Show and sort by tag",
              "Each image's tags appear under its name. Use the menu next to Images to show only the images "
              "with one tag, or the untagged ones, and to sort by name, date modified or tag."),
@@ -576,7 +584,7 @@ class ImageItem(GObject.Object):
         self.display_name = GLib.filename_display_name(self.name)
         self.mtime = mtime
         self.size = size
-        self.tags = None  # filled in from TagCache; None until read
+        self.tags = None  # filled in from TagIndex; None until read
 
 
 def scan_folder(folder, sort_by, show_hidden):
@@ -618,64 +626,261 @@ def sort_by_tag(items):
     return sorted(items, key=key)
 
 
-class TagCache:
-    """Tags of each image, read in the background and kept per (path, mtime).
+def read_file_tags(path):
+    metadata = open_metadata(path)
+    if metadata is None:
+        return []
+    with METADATA_LOCK:
+        return read_tags(metadata)
 
-    Saved between runs, since reading thousands of photos from a USB drive takes a while.
+
+def _storable(path):
+    """SQLite text must be valid UTF-8; a few odd file names aren't."""
+    try:
+        path.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _under(roots):
+    """SQL condition and parameters matching paths inside any of roots ('/' sorts just before '0')."""
+    if not roots:
+        return "0", []
+    return " OR ".join(["(path >= ? AND path < ?)"] * len(roots)), \
+        [bound for root in roots for bound in (root.rstrip("/") + "/", root.rstrip("/") + "0")]
+
+
+class TagIndex:
+    """Every image's tags, saved in a small database between runs.
+
+    Reading tags from thousands of photos on a USB drive is slow, so each file's tags
+    are read once and kept until its modified time changes. Only the main thread uses
+    the database; background threads just read files.
     """
 
     def __init__(self):
-        self.path = os.path.join(GLib.get_user_cache_dir(), "image2", "tags.json")
-        self.cache = {}
         self.generation = 0
+        # In the Snap, the common dir: it's kept as is across updates, not copied per revision
+        folder = os.path.join(os.environ.get("SNAP_USER_COMMON") or GLib.get_user_cache_dir(), "image2")
         try:
-            with open(self.path) as f:
-                for path, mtime, tags in json.load(f):
-                    self.cache[(path, mtime)] = tags
-        except (OSError, ValueError, TypeError):
-            pass
-
-    def save(self):
-        latest = {}  # one entry per file: an edited file's older entries are dropped
-        for (path, mtime), tags in self.cache.items():
-            if path not in latest or mtime > latest[path][0]:
-                latest[path] = (mtime, tags)
-        self.cache = {(path, mtime): tags for path, (mtime, tags) in latest.items()}
+            os.makedirs(folder, exist_ok=True)
+            self.db = self._open(os.path.join(folder, "tags.db"))
+        except (OSError, sqlite3.Error):
+            self.db = self._open(":memory:")
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path + ".tmp", "w") as f:
-                json.dump([[path, mtime, tags] for (path, mtime), tags in self.cache.items()], f)
-            os.replace(self.path + ".tmp", self.path)
+            os.remove(os.path.join(GLib.get_user_cache_dir(), "image2", "tags.json"))  # replaced by tags.db
         except OSError:
             pass
 
-    def lookup(self, item):
-        return self.cache.get((item.path, item.mtime))
+    @staticmethod
+    def _open(path):
+        db = sqlite3.connect(path)
+        db.executescript("""
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE IF NOT EXISTS images (path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, tags TEXT);
+            CREATE TABLE IF NOT EXISTS image_tags (path TEXT, tag TEXT, folded TEXT);
+            CREATE INDEX IF NOT EXISTS image_tags_folded ON image_tags (folded);
+            CREATE INDEX IF NOT EXISTS image_tags_path ON image_tags (path);
+        """)
+        return db
+
+    def close(self):
+        self.db.close()
+
+    # Folder view
+
+    def lookup(self, items):
+        """{path: tags} for the items whose indexed modified time still matches."""
+        wanted = {i.path: i.mtime for i in items}
+        found = {path: [] for path in wanted if not _storable(path)}
+        paths = [path for path in wanted if path not in found]
+        for start in range(0, len(paths), 500):
+            chunk = paths[start:start + 500]
+            rows = self.db.execute(f"SELECT path, mtime, tags FROM images WHERE path IN "
+                                   f"({','.join('?' * len(chunk))})", chunk)
+            for path, mtime, tags in rows:
+                if wanted[path] == mtime:
+                    found[path] = json.loads(tags)
+        return found
 
     def load(self, items, done):
-        """Read the tags of items not cached yet, then call done() unless a newer load started."""
+        """Read the tags of items in the background, save them, then call done() unless a newer load started."""
         self.generation += 1
         generation = self.generation
-        keys = [(i.path, i.mtime) for i in items if (i.path, i.mtime) not in self.cache]
+        todo = [(i.path, i.mtime, i.size) for i in items]
 
         def work():
-            found = {}
-            for key in keys:
+            found = []
+            for path, mtime, size in todo:
                 if generation != self.generation:
                     break
-                metadata = open_metadata(key[0])
-                with METADATA_LOCK:
-                    found[key] = read_tags(metadata) if metadata else []
+                found.append((path, mtime, size, read_file_tags(path)))
             return found
 
         def finished(found, error):
             if found:
-                self.cache.update(found)
-                self.save()
+                self.store(found)
             if generation == self.generation and error is None:
                 done()
 
         run_in_thread(work, finished)
+
+    # Changes
+
+    def store(self, entries):
+        """Save [(path, mtime, size, tags)]."""
+        with self.db:
+            for path, mtime, size, tags in entries:
+                if not _storable(path):
+                    continue
+                self.db.execute("INSERT OR REPLACE INTO images VALUES (?, ?, ?, ?)",
+                                (path, mtime, size, json.dumps(tags)))
+                self.db.execute("DELETE FROM image_tags WHERE path = ?", (path,))
+                self.db.executemany("INSERT INTO image_tags VALUES (?, ?, ?)",
+                                    [(path, tag, tag.casefold()) for tag in tags])
+
+    def store_paths(self, saved):
+        """Save {path: tags} just written, with each file's new modified time."""
+        entries = []
+        for path, tags in saved.items():
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            entries.append((path, st.st_mtime_ns, st.st_size, tags))
+        self.store(entries)
+
+    def remove(self, paths):
+        with self.db:
+            for path in paths:
+                if _storable(path):
+                    self.db.execute("DELETE FROM images WHERE path = ?", (path,))
+                    self.db.execute("DELETE FROM image_tags WHERE path = ?", (path,))
+
+    def move(self, pairs):
+        """Images moved or renamed keep their tags: [(old path, new path)]."""
+        with self.db:
+            for old, new in pairs:
+                if _storable(old) and _storable(new):
+                    self.db.execute("DELETE FROM images WHERE path = ?", (new,))
+                    self.db.execute("DELETE FROM image_tags WHERE path = ?", (new,))
+                    self.db.execute("UPDATE images SET path = ? WHERE path = ?", (new, old))
+                    self.db.execute("UPDATE image_tags SET path = ? WHERE path = ?", (new, old))
+
+    # Library
+
+    def mtimes(self, roots):
+        where, params = _under(roots)
+        return dict(self.db.execute(f"SELECT path, mtime FROM images WHERE {where}", params))
+
+    def count_images(self, roots):
+        where, params = _under(roots)
+        return self.db.execute(f"SELECT COUNT(*) FROM images WHERE {where}", params).fetchone()[0]
+
+    def tag_counts(self, roots):
+        """[(tag, folded, number of images)] in roots, alphabetically."""
+        where, params = _under(roots)
+        return self.db.execute(f"SELECT MIN(tag), folded, COUNT(DISTINCT path) FROM image_tags WHERE {where} "
+                               f"GROUP BY folded ORDER BY folded", params).fetchall()
+
+    def _matching(self, folded, match_all, roots):
+        where, params = _under(roots)
+        return (f"SELECT path FROM image_tags WHERE folded IN ({','.join('?' * len(folded))}) AND ({where}) "
+                f"GROUP BY path HAVING COUNT(DISTINCT folded) >= ?",
+                list(folded) + params + [len(folded) if match_all else 1])
+
+    def count(self, folded, match_all, roots):
+        query, params = self._matching(folded, match_all, roots)
+        return self.db.execute(f"SELECT COUNT(*) FROM ({query})", params).fetchone()[0]
+
+    def search(self, folded, match_all, roots):
+        """[(path, mtime, size, tags)] of the images with any (or all) of the folded tags."""
+        query, params = self._matching(folded, match_all, roots)
+        rows = self.db.execute(f"SELECT path, mtime, size, tags FROM images WHERE path IN ({query})", params)
+        return [(path, mtime, size, json.loads(tags)) for path, mtime, size, tags in rows]
+
+
+class Library:
+    """Keeps the tag index up to date for every image under the pinned folders, in the background."""
+
+    def __init__(self, index):
+        self.index = index
+        self.generation = 0
+        self.running = False
+        self.roots_scanned = None
+        self.checked = 0  # images looked at so far in this pass
+        self.listeners = []  # called on the main loop as the index changes
+
+    @staticmethod
+    def roots(folders):
+        """The pinned folders that exist, leaving out any inside another one."""
+        roots = []
+        for folder in sorted({os.path.abspath(f) for f in folders}):
+            if os.path.isdir(folder) and not any(folder.startswith(r.rstrip("/") + "/") for r in roots):
+                roots.append(folder)
+        return roots
+
+    def refresh(self, folders, show_hidden):
+        """Look through every image under folders; read tags of new and changed ones."""
+        roots = self.roots(folders)
+        if self.running and roots == self.roots_scanned:
+            return
+        self.generation += 1
+        generation = self.generation
+        self.running, self.roots_scanned, self.checked = True, roots, 0
+        known = self.index.mtimes(roots)
+
+        def work():
+            batch, missing, checked, last = [], set(known), 0, time.monotonic()
+            for root in roots:
+                for folder, dirs, files in os.walk(root):
+                    if generation != self.generation:
+                        return None
+                    dirs[:] = [d for d in dirs
+                               if not d.startswith(".Trash") and (show_hidden or not d.startswith("."))]
+                    for name in files:
+                        if (not show_hidden and name.startswith(".")) or not is_image(name):
+                            continue
+                        path = os.path.join(folder, name)
+                        try:
+                            st = os.stat(path)
+                        except OSError:
+                            continue
+                        checked += 1
+                        missing.discard(path)
+                        if known.get(path) != st.st_mtime_ns:
+                            batch.append((path, st.st_mtime_ns, st.st_size, read_file_tags(path)))
+                        if time.monotonic() - last > 1:
+                            GLib.idle_add(self._merge, generation, batch, checked, None)
+                            batch, last = [], time.monotonic()
+            return batch, checked, missing
+
+        def finished(result, error):
+            if generation != self.generation:
+                return
+            if result is None or error is not None:
+                self.running = False
+                self._notify()
+                return
+            self._merge(generation, *result)
+
+        run_in_thread(work, finished)
+
+    def _merge(self, generation, batch, checked, missing):
+        if generation == self.generation:
+            if batch:
+                self.index.store(batch)
+            self.checked = checked
+            if missing is not None:  # the pass is complete: forget images that are gone
+                self.index.remove(missing)
+                self.running = False
+            self._notify()
+        return False
+
+    def _notify(self):
+        for listener in list(self.listeners):
+            listener()
 
 
 class FolderNode(GObject.Object):
@@ -873,10 +1078,12 @@ def edit_tags(tags, add=(), remove=(), rename=None):
 class PropertiesDialog(Adw.PreferencesDialog):
     """Details of one image, or a summary of several, with their tags to edit."""
 
-    def __init__(self, paths, known_tags):
-        """known_tags: {path: tags} already read for the image list; missing ones are read here."""
+    def __init__(self, paths, known_tags, on_saved=None):
+        """known_tags: {path: tags} already read for the image list; missing ones are read here.
+        on_saved({path: tags}) runs after tags are written."""
         super().__init__(title="Properties")
         self.paths = paths
+        self.on_saved = on_saved
         self.tags = {}  # path → tags, for the images that can hold tags
         page = Adw.PreferencesPage()
         self.add(page)
@@ -1060,6 +1267,8 @@ class PropertiesDialog(Adw.PreferencesDialog):
             self.tags_group.set_sensitive(True)
             saved, errors = result if result else ({}, [str(error)])
             self.tags.update(saved)
+            if saved and self.on_saved:
+                self.on_saved(saved)
             self._show_tags()
             if errors:
                 what = "" if len(writes) == 1 else f" in {plural(len(errors), 'image')}"
@@ -1072,6 +1281,124 @@ class PropertiesDialog(Adw.PreferencesDialog):
         run_in_thread(work, done)
 
 
+class FindByTagDialog(Adw.PreferencesDialog):
+    """Pick tags to list every image that has them, from all pinned folders."""
+
+    def __init__(self, window):
+        super().__init__(title="Find by Tag", search_enabled=True)
+        self.window = window
+        app = window.get_application()
+        self.index, self.library, self.settings = app.tag_index, app.library, window.settings
+        self.roots = Library.roots(self.settings["folders"])
+        search = window.search or {}
+        self.checked = dict(zip(search.get("folded", []), search.get("tags", [])))  # folded → tag
+        self.rows = []
+        self.fill_source = 0
+
+        page = Adw.PreferencesPage()
+        self.add(page)
+        status = Adw.PreferencesGroup()
+        page.add(status)
+        self.status_row = Adw.ActionRow()
+        self.spinner = Gtk.Spinner(spinning=True, valign=Gtk.Align.CENTER)
+        self.status_row.add_suffix(self.spinner)
+        status.add(self.status_row)
+
+        options = Adw.PreferencesGroup()
+        page.add(options)
+        self.match_row = Adw.ComboRow(title="Show Images With",
+                                      model=Gtk.StringList.new(["Any Selected Tag", "All Selected Tags"]),
+                                      selected=1 if search.get("all") else 0)
+        self.match_row.connect("notify::selected", lambda *_: self._update_button())
+        options.add(self.match_row)
+
+        self.tags_group = Adw.PreferencesGroup(title="Tags")
+        page.add(self.tags_group)
+        self.show_button = Gtk.Button(label="Show Images", valign=Gtk.Align.CENTER,
+                                      css_classes=["suggested-action"])
+        self.show_button.connect("clicked", self._on_show)
+        self.tags_group.set_header_suffix(self.show_button)
+
+        self.library.listeners.append(self._on_library_changed)
+        self.connect("closed", self._on_closed)
+        self._fill()
+        if self.roots:
+            self.library.refresh(self.settings["folders"], self.settings["show_hidden"])
+        self._update_status()
+
+    def _on_closed(self, *_):
+        self.library.listeners.remove(self._on_library_changed)
+        if self.fill_source:
+            GLib.source_remove(self.fill_source)
+
+    def _on_library_changed(self):
+        self._update_status()
+        if not self.fill_source:  # refill the tag list at most every two seconds while indexing
+            self.fill_source = GLib.timeout_add(0 if not self.library.running else 2000, self._fill_later)
+
+    def _fill_later(self):
+        self.fill_source = 0
+        self._fill()
+        return False
+
+    def _update_status(self):
+        running = self.library.running
+        self.spinner.set_visible(running)
+        if not self.roots:
+            self.status_row.set_title("No pinned folders")
+            self.status_row.set_subtitle("Pin folders in the sidebar to find their images by tag.")
+        elif running:
+            self.status_row.set_title("Indexing your pinned folders…")
+            self.status_row.set_subtitle(
+                f"{self.library.checked:,} images checked. Tags appear here as they're found; the first "
+                "time on a large collection can take a while, and you can keep using Image2-Viewer.")
+        else:
+            total = self.index.count_images(self.roots)
+            self.status_row.set_title(f"{plural(total, 'image')} indexed")
+            self.status_row.set_subtitle("In your pinned folders and their subfolders.")
+
+    def _fill(self):
+        for row in self.rows:
+            self.tags_group.remove(row)
+        self.rows = []
+        counts = self.index.tag_counts(self.roots)
+        if not counts:
+            self.tags_group.set_description(
+                "No tagged images found yet." + (" Still looking…" if self.library.running
+                                                 else " Add tags in Properties (Alt+Enter)."))
+        else:
+            self.tags_group.set_description(None)
+        for tag, folded, count in counts:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(tag), subtitle=plural(count, "image"))
+            check = Gtk.CheckButton(active=folded in self.checked, valign=Gtk.Align.CENTER)
+            check.connect("toggled", self._on_toggled, tag, folded)
+            row.add_prefix(check)
+            row.set_activatable_widget(check)
+            self.tags_group.add(row)
+            self.rows.append(row)
+        self._update_button()
+
+    def _on_toggled(self, check, tag, folded):
+        if check.get_active():
+            self.checked[folded] = tag
+        else:
+            self.checked.pop(folded, None)
+        self._update_button()
+
+    def _update_button(self):
+        if not self.checked:
+            self.show_button.set_label("Show Images")
+            self.show_button.set_sensitive(False)
+            return
+        count = self.index.count(list(self.checked), self.match_row.get_selected() == 1, self.roots)
+        self.show_button.set_label(f"Show {plural(count, 'Image')}")
+        self.show_button.set_sensitive(count > 0)
+
+    def _on_show(self, *_):
+        self.window.show_tag_search(list(self.checked.values()), self.match_row.get_selected() == 1)
+        self.close()
+
+
 # ----------------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------------
@@ -1082,7 +1409,10 @@ class ImageWindow(Adw.ApplicationWindow):
         self.set_size_request(360, 300)
         self.settings = app.settings
         self.thumbs = app.thumbs
-        self.tag_cache = app.tag_cache
+        self.tag_index = app.tag_index
+        self.library = app.library
+        self.search = None  # {"tags", "folded", "all"} while showing a Find by Tag result
+        self.search_source = 0
 
         self.folder = None
         self.tag_filter = ""  # "" for all images, a tag, or UNTAGGED
@@ -1101,6 +1431,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self._install_actions()
         self._install_input()
         self.settings_handler = self.settings.connect("changed", self._on_settings_changed)
+        self.library.listeners.append(self._on_library_changed)
         self.connect("close-request", self._on_close)
         self.connect("notify::fullscreened", self._on_fullscreen_changed)
         self.rebuild_folders()
@@ -1147,6 +1478,8 @@ class ImageWindow(Adw.ApplicationWindow):
 
         folder_header = Gtk.Box(margin_start=12, margin_end=6, margin_top=6)
         folder_header.append(Gtk.Label(label="Folders", xalign=0, hexpand=True, css_classes=["heading"]))
+        folder_header.append(Gtk.Button(icon_name="system-search-symbolic", action_name="win.find-tags",
+                                        tooltip_text="Find by Tag… (Ctrl+F)", css_classes=["flat"]))
         folder_header.append(Gtk.Button(icon_name="list-add-symbolic", action_name="win.add-folder",
                                         tooltip_text="Pin Folders to Sidebar…", css_classes=["flat"]))
         folders_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=90)
@@ -1164,6 +1497,10 @@ class ImageWindow(Adw.ApplicationWindow):
         self.view_button = Gtk.MenuButton(label="All", menu_model=self.tag_menu, css_classes=["flat"],
                                           always_show_arrow=True, tooltip_text="Show and Sort Images")
         images_header.append(self.view_button)
+        self.search_close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="End Tag Search",
+                                       css_classes=["flat"], visible=False)
+        self.search_close.connect("clicked", lambda *_: self.end_tag_search())
+        images_header.append(self.search_close)
         images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=120)
         images_box.append(images_header)
         images_box.append(list_scroller)
@@ -1233,6 +1570,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section.append("Open Folder…", "win.open-folder")
         menu.append_section(None, section)
         section = Gio.Menu()
+        section.append("Find by Tag…", "win.find-tags")
         section.append("Pin Folders to Sidebar…", "win.add-folder")
         section.append("Pin Current Folder to Sidebar", "win.pin-current")
         menu.append_section(None, section)
@@ -1342,9 +1680,14 @@ class ImageWindow(Adw.ApplicationWindow):
         item = list_item.get_item()
         box.item = item
         box.label.set_label(item.display_name)
-        box.tags.set_label(", ".join(item.tags or []))
-        box.tags.set_visible(bool(item.tags))
-        box.set_tooltip_text(item.display_name + (f"\n{', '.join(item.tags)}" if item.tags else ""))
+        caption = ", ".join(item.tags or [])
+        if self.search:
+            folder = GLib.filename_display_basename(os.path.dirname(item.path))
+            caption = f"{folder} · {caption}" if caption else folder
+        box.tags.set_label(caption)
+        box.tags.set_visible(bool(caption))
+        tooltip = GLib.filename_display_name(item.path) if self.search else item.display_name
+        box.set_tooltip_text(tooltip + (f"\n{', '.join(item.tags)}" if item.tags else ""))
         show = self.settings["show_thumbnails"]
         box.thumb.set_visible(show)
         if not show:
@@ -1574,6 +1917,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "open-with": self.on_open_with,
             "show-containing": lambda *_: show_containing_folder(self, self.current_path),
             "properties": self.on_properties,
+            "find-tags": lambda *_: FindByTagDialog(self).present(self),
             "copy-to": lambda *_: self.on_transfer(move=False),
             "move-to": lambda *_: self.on_transfer(move=True),
             "rename": self.on_rename,
@@ -1777,6 +2121,8 @@ class ImageWindow(Adw.ApplicationWindow):
             self.toast(f"“{GLib.filename_display_name(path)}” no longer exists")
             self._sync_folder_selection()
             return
+        if self.search:
+            self._leave_search()
         if folder != self.folder:
             self.folder = folder
             self.set_tag_filter("", rescan=False)
@@ -1809,19 +2155,23 @@ class ImageWindow(Adw.ApplicationWindow):
         self.rescan_source = GLib.timeout_add(300, fire)
 
     def rescan(self, select_path=None):
-        if not self.folder:
+        if not self.folder and not self.search:
             return
         keep = [] if select_path else self.selected_paths()
         old_index = self.path_index.get(self.current_path, 0)
-        items = scan_folder(self.folder, self.settings["sort_by"], self.settings["show_hidden"])
+        if self.search:
+            items = self._search_items()
+            unknown = []
+        else:
+            items = scan_folder(self.folder, self.settings["sort_by"], self.settings["show_hidden"])
+            known = self.tag_index.lookup(items)
+            for item in items:
+                item.tags = known.get(item.path)
+            unknown = [item for item in items if item.tags is None]
         total = len(items)
-        unknown = False
-        for item in items:
-            item.tags = self.tag_cache.lookup(item)
-            unknown = unknown or item.tags is None
-        self.tags_loading = unknown and GExiv2 is not None
+        self.tags_loading = bool(unknown) and GExiv2 is not None
         if self.tags_loading:
-            self.tag_cache.load(items, self.rescan)
+            self.tag_index.load(unknown, self.rescan)
         elif self.tag_filter and not self._filter_matches_any(items):
             self.set_tag_filter("", rescan=False)  # its last image lost the tag, or moved away
         self._update_tag_menu(items)
@@ -1837,8 +2187,14 @@ class ImageWindow(Adw.ApplicationWindow):
             self.updating = False
         self.path_index = {item.path: i for i, item in enumerate(items)}
 
-        self.sidebar_title.set_title(GLib.filename_display_basename(self.folder))
         count = f"{len(items)} of {plural(total, 'image')}" if self.tag_filter else plural(total, "image")
+        if self.search:
+            joiner = " + " if self.search["all"] else " or "
+            self.sidebar_title.set_title(joiner.join(self.search["tags"]))
+            folders = len({os.path.dirname(item.path) for item in items})
+            count += f" in {plural(folders, 'folder')}" + (" · indexing…" if self.library.running else "")
+        else:
+            self.sidebar_title.set_title(GLib.filename_display_basename(self.folder))
         self.sidebar_title.set_subtitle(count + (" · reading tags…" if self.tags_loading else ""))
 
         if not items:
@@ -1876,7 +2232,76 @@ class ImageWindow(Adw.ApplicationWindow):
         for i in range(self.store.get_n_items()):
             item = self.store.get_item(i)
             known[item.path] = item.tags
-        PropertiesDialog(paths, known).present(self)
+        PropertiesDialog(paths, known, on_saved=self._on_tags_saved).present(self)
+
+    def _on_tags_saved(self, saved):
+        self.tag_index.store_paths(saved)
+        if self.search:
+            self.rescan()  # no folder monitor while showing search results
+
+    # -------------------------------------------------------- tag search ---
+
+    def show_tag_search(self, tags, match_all):
+        """List every image in the pinned folders with any (or all) of tags."""
+        if self.monitor:
+            self.monitor.cancel()
+            self.monitor = None
+        self.search = {"tags": tags, "folded": [t.casefold() for t in tags], "all": match_all}
+        self.folder = None
+        self.current_path = None
+        self.path_index = {}
+        self.set_tag_filter("", rescan=False)
+        self.search_close.set_visible(True)
+        self._sync_folder_selection()
+        self.rescan()
+
+    def _leave_search(self):
+        self.search = None
+        self.search_close.set_visible(False)
+        self.current_path = None
+        self.path_index = {}
+
+    def end_tag_search(self):
+        self._leave_search()
+        last = self.settings["last_folder"]
+        if last and os.path.isdir(last):
+            self.open_path(last)
+            return
+        self.updating = True
+        try:
+            self.store.remove_all()
+        finally:
+            self.updating = False
+        self.sidebar_title.set_title(APP_NAME)
+        self.sidebar_title.set_subtitle("")
+        self.view.set_texture(None)
+        self.stack.set_visible_child_name("welcome")
+        self.update_title()
+        self.update_actions()
+
+    def _search_items(self):
+        rows = self.tag_index.search(self.search["folded"], self.search["all"],
+                                     Library.roots(self.settings["folders"]))
+        items = []
+        for path, mtime, size, tags in rows:
+            item = ImageItem(path, mtime, size)
+            item.tags = tags
+            items.append(item)
+        if self.settings["sort_by"] == "date":
+            items.sort(key=lambda i: (i.mtime, i.path))
+        else:
+            items.sort(key=lambda i: (GLib.utf8_collate_key_for_filename(i.display_name, -1), i.path))
+        return items
+
+    def _on_library_changed(self):
+        if self.search and not self.search_source:  # show new matches as indexing finds them
+            self.search_source = GLib.timeout_add(1500, self._rescan_search)
+
+    def _rescan_search(self):
+        self.search_source = 0
+        if self.search:
+            self.rescan()
+        return False
 
     def _matches_filter(self, item):
         if self.tag_filter == UNTAGGED:
@@ -2225,26 +2650,28 @@ class ImageWindow(Adw.ApplicationWindow):
                 toast.connect("button-clicked", lambda *_: show_folder(self, dest_dir))
             self.toasts.add_toast(toast)
             if move:
+                self.tag_index.move(moved)
                 self.rescan()
 
         run_in_thread(work, finished)
 
     def _undo_move(self, moved):
         def work():
-            restored = 0
+            restored = []
             for original, dest in moved:
                 if os.path.lexists(original):
                     continue  # never overwrite something created since
                 try:
                     Gio.File.new_for_path(dest).move(Gio.File.new_for_path(original),
                                                      Gio.FileCopyFlags.NOFOLLOW_SYMLINKS, None, None, None)
-                    restored += 1
+                    restored.append((dest, original))
                 except GLib.Error:
                     pass
             return restored
 
         def finished(restored, error):
-            self.toast(f"Moved {plural(restored or 0, 'image')} back")
+            self.tag_index.move(restored or [])
+            self.toast(f"Moved {plural(len(restored or []), 'image')} back")
             self.rescan(select_path=moved[0][0] if restored else None)
 
         run_in_thread(work, finished)
@@ -2264,6 +2691,7 @@ class ImageWindow(Adw.ApplicationWindow):
             except GLib.Error as e:
                 self.toast(f"Could not rename: {e.message}")
                 return
+            self.tag_index.move([(path, new_path)])
             self.rescan(select_path=new_path)
 
         self._name_dialog("Rename Image", folder, os.path.basename(path), "_Rename", rename)
@@ -2341,6 +2769,7 @@ class ImageWindow(Adw.ApplicationWindow):
     def _delete(self, paths, use_trash):
         def work():
             errors = []  # (message, trash not supported)
+            gone = []
             for path in paths:
                 file = Gio.File.new_for_path(path)
                 try:
@@ -2353,14 +2782,17 @@ class ImageWindow(Adw.ApplicationWindow):
                             trash_on_drive(path)
                     else:
                         file.delete(None)
+                    gone.append(path)
                 except GLib.Error as e:
                     errors.append((e.message, e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_SUPPORTED)))
                 except OSError as e:
                     errors.append((e.strerror or str(e), False))
-            return errors
+            return errors, gone
 
-        def finished(errors, error):
-            removed = len(paths) - len(errors or [])
+        def finished(result, error):
+            errors, gone = result or ([], [])
+            self.tag_index.remove(gone)
+            removed = len(paths) - len(errors)
             verb = "Moved" if use_trash else "Deleted"
             message = f"{verb} {plural(removed, 'image')}" + (" to the trash" if use_trash else "")
             if error is not None:
@@ -2401,6 +2833,9 @@ class ImageWindow(Adw.ApplicationWindow):
         if self.monitor:
             self.monitor.cancel()
         self.settings.disconnect(self.settings_handler)
+        self.library.listeners.remove(self._on_library_changed)
+        if self.search_source:
+            GLib.source_remove(self.search_source)
         return False
 
 
@@ -2413,14 +2848,16 @@ class Application(Adw.Application):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.settings = None
         self.thumbs = None
-        self.tag_cache = None
+        self.tag_index = None
+        self.library = None
 
     def do_startup(self):
         Adw.Application.do_startup(self)
         GLib.set_application_name(APP_NAME)
         self.settings = Settings()
         self.thumbs = ThumbnailCache()
-        self.tag_cache = TagCache()
+        self.tag_index = TagIndex()
+        self.library = Library(self.tag_index)
         # Running from the source folder: find the app icon in ./icons
         icons = os.path.join(os.path.dirname(os.path.realpath(__file__)), "icons")
         if os.path.isdir(icons):
@@ -2456,6 +2893,7 @@ class Application(Adw.Application):
             "win.move-to": ["<Control><Shift>m"],
             "win.rename": ["F2"],
             "win.properties": ["<Alt>Return", "<Alt>KP_Enter"],
+            "win.find-tags": ["<Control>f"],
             "win.toggle-sidebar": ["F9"],
             "win.fullscreen": ["F11"],
         }
@@ -2481,6 +2919,9 @@ class Application(Adw.Application):
     def do_shutdown(self):
         if self.thumbs:
             self.thumbs.shutdown()
+        if self.tag_index:
+            self.library.generation += 1  # stops a running index pass
+            self.tag_index.close()
         Adw.Application.do_shutdown(self)
 
     def on_preferences(self, *_):
