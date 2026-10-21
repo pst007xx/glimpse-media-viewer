@@ -26,6 +26,10 @@ APP_ID = "io.github.imagery.Image2"
 APP_NAME = "Image2-Viewer"
 VERSION = "1.0"
 
+# In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
+# dialogs and drag-and-drop give real paths; host apps are reached via portal_open().
+IN_SNAP = "SNAP" in os.environ
+
 THUMB_SIZE = 40
 ZOOM_STEP = 1.25
 ZOOM_MIN = 0.02
@@ -84,7 +88,6 @@ SHORTCUTS = [
         ("Copy to pinned folder 1–9", "<Control><Alt>1...<Control><Alt>9"),
         ("Rename", "F2"),
         ("Delete", "Delete"),
-        ("Open in external editor", "<Control>e"),
     ]),
 ]
 
@@ -142,13 +145,12 @@ HELP = [
              "permanent deletion always asks first."),
         ]),
     ]),
-    ("Editing & More", "document-edit-symbolic", [
-        ("External Editor", [
-            ("Choose an editor",
-             "In Preferences, pick an installed graphics app or enter a custom command such as “gimp %f”."),
-            ("Open in the editor",
-             "Press Ctrl+E or use the edit button. When the editor saves, Image2-Viewer reloads the image automatically."),
-            ("Other apps", "Open With… lets you pick any installed app for the current image."),
+    ("Other Apps & More", "document-edit-symbolic", [
+        ("Other Apps", [
+            ("Open With…",
+             "Pick any installed app, such as an editor, for the current image. When that app saves, "
+             "Image2-Viewer reloads the image automatically."),
+            ("Open Containing Folder", "Shows the current image in your file manager."),
         ]),
         ("Wallpaper", [
             ("Set as wallpaper",
@@ -267,37 +269,14 @@ def load_thumbnail(path, size):
     return pixbuf.apply_embedded_orientation() or pixbuf
 
 
-def image_editor_candidates():
-    """Installed applications that can open common image types."""
-    found = {}
-    for mime in ("image/png", "image/jpeg", "image/tiff", "image/webp", "image/gif", "image/svg+xml"):
-        for app in Gio.AppInfo.get_all_for_type(mime):
-            app_id = app.get_id()
-            if app_id and app_id not in found and app_id != APP_ID + ".desktop" and app.should_show():
-                found[app_id] = app
-    # Browsers and office suites also claim images; keep to graphics apps when possible.
-    graphics = {k: a for k, a in found.items()
-                if "Graphics" in ((a.get_categories() or "") if hasattr(a, "get_categories") else "")}
-    return sorted((graphics or found).values(), key=lambda a: a.get_display_name().lower())
-
-
-def find_app(app_id):
-    for app in Gio.AppInfo.get_all():
-        if app.get_id() == app_id:
-            return app
-    return None
-
-
-# In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
-# dialogs and drag-and-drop give real paths; host apps are reached via the portal below.
-IN_SNAP = "SNAP" in os.environ
-
-
 _portal_requests = 0
 
 
 def portal_open(window, path, directory=False, on_error=None):
-    """Open path in a host app (asking which) or its folder in Files, via the OpenURI portal."""
+    """Open path in a host app (asking which) or its folder in Files, via the OpenURI portal.
+
+    With directory=True the file manager opens the folder containing path, with path selected.
+    """
     global _portal_requests
     try:
         fds = Gio.UnixFDList.new()
@@ -385,6 +364,14 @@ def trash_on_drive(path):
         raise
 
 
+def show_containing_folder(window, path):
+    """Open the folder holding path in the file manager, with path selected."""
+    if IN_SNAP:
+        portal_open(window, path, directory=True)
+    else:
+        Gtk.FileLauncher(file=Gio.File.new_for_path(path)).open_containing_folder(window, None, None)
+
+
 def show_folder(window, path):
     if IN_SNAP:
         portal_open(window, path, directory=True)
@@ -411,9 +398,6 @@ class Settings(GObject.Object):
     __gsignals__ = {"changed": (GObject.SignalFlags.RUN_FIRST, None, (str,))}
 
     DEFAULTS = {
-        "editor_mode": "none",          # none | app | custom
-        "editor_app": "",               # desktop file id
-        "editor_command": "",           # e.g. "gimp %f"
         "use_trash": True,
         "confirm_delete": True,
         "show_thumbnails": True,
@@ -648,18 +632,6 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page = Adw.PreferencesPage(title="General", icon_name="preferences-system-symbolic")
         self.add(page)
 
-        # External editor
-        editor = Adw.PreferencesGroup(
-            title="External Editor",
-            description="Used by “Open in Editor” (Ctrl+E). The image reloads automatically after you save.")
-        page.add(editor)
-
-        if IN_SNAP:
-            editor.set_description("In the Snap version, “Open in Editor” (Ctrl+E) asks which installed app "
-                                   "to use. The image reloads automatically after you save.")
-        else:
-            self._add_editor_rows(editor)
-
         # Files
         files = Adw.PreferencesGroup(title="Deleting")
         page.add(files)
@@ -677,51 +649,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
                          lambda row, _: settings.__setitem__("sort_by", "date" if row.get_selected() else "name"))
         sidebar.add(sort_row)
 
-    def _add_editor_rows(self, editor):
-        settings = self.settings
-        self.apps = image_editor_candidates()
-        names = ["None"] + [a.get_display_name() for a in self.apps] + ["Custom Command"]
-        self.editor_row = Adw.ComboRow(title="Editor", model=Gtk.StringList.new(names))
-        self.editor_row.set_selected(self._editor_index())
-        self.editor_row.connect("notify::selected", self._on_editor_selected)
-        editor.add(self.editor_row)
-
-        self.command_row = Adw.EntryRow(title="Command  (%f is replaced by the file path)")
-        self.command_row.set_text(settings["editor_command"])
-        self.command_row.connect("changed", lambda row: settings.__setitem__("editor_command", row.get_text()))
-        editor.add(self.command_row)
-        self._update_command_row()
-
     def _switch(self, title, subtitle, key):
         row = Adw.SwitchRow(title=title, active=self.settings[key])
         if subtitle:
             row.set_subtitle(subtitle)
         row.connect("notify::active", lambda r, _: self.settings.__setitem__(key, r.get_active()))
         return row
-
-    def _editor_index(self):
-        mode = self.settings["editor_mode"]
-        if mode == "custom":
-            return len(self.apps) + 1
-        if mode == "app":
-            for i, app in enumerate(self.apps):
-                if app.get_id() == self.settings["editor_app"]:
-                    return i + 1
-        return 0
-
-    def _on_editor_selected(self, row, _):
-        i = row.get_selected()
-        if i == 0:
-            self.settings["editor_mode"] = "none"
-        elif i <= len(self.apps):
-            self.settings["editor_app"] = self.apps[i - 1].get_id()
-            self.settings["editor_mode"] = "app"
-        else:
-            self.settings["editor_mode"] = "custom"
-        self._update_command_row()
-
-    def _update_command_row(self):
-        self.command_row.set_visible(self.settings["editor_mode"] == "custom")
 
 
 # ----------------------------------------------------------------------------
@@ -882,8 +815,8 @@ class ImageWindow(Adw.ApplicationWindow):
         section.append("Pin Current Folder to Sidebar", "win.pin-current")
         menu.append_section(None, section)
         section = Gio.Menu()
-        section.append("Open in Editor", "win.edit")
         section.append("Open With…", "win.open-with")
+        section.append("Open Containing Folder", "win.show-containing")
         section.append_submenu("Set as Wallpaper", wallpaper_menu())
         menu.append_section(None, section)
         section = Gio.Menu()
@@ -897,8 +830,6 @@ class ImageWindow(Adw.ApplicationWindow):
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
                                        tooltip_text="Main Menu"))
-        header.pack_end(Gtk.Button(icon_name="document-edit-symbolic", action_name="win.edit",
-                                   tooltip_text="Open in External Editor (Ctrl+E)"))
 
         zoom = Gtk.Box(css_classes=["linked"])
         zoom.append(Gtk.Button(icon_name="zoom-out-symbolic", action_name="win.zoom-out",
@@ -928,8 +859,8 @@ class ImageWindow(Adw.ApplicationWindow):
         # Context menus
         file_menu = Gio.Menu()
         section = Gio.Menu()
-        section.append("Open in Editor", "win.edit")
         section.append("Open With…", "win.open-with")
+        section.append("Open Containing Folder", "win.show-containing")
         section.append_submenu("Set as Wallpaper", wallpaper_menu())
         file_menu.append_section(None, section)
         section = Gio.Menu()
@@ -1208,8 +1139,8 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-fit": lambda *_: self.view.set_fit(),
             "zoom-original": lambda *_: self.zoom_to(1.0),
             "zoom-toggle": lambda *_: self.toggle_fit(),
-            "edit": self.on_edit,
             "open-with": self.on_open_with,
+            "show-containing": lambda *_: show_containing_folder(self, self.current_path),
             "copy-to": lambda *_: self.on_transfer(move=False),
             "move-to": lambda *_: self.on_transfer(move=True),
             "rename": self.on_rename,
@@ -1576,8 +1507,8 @@ class ImageWindow(Adw.ApplicationWindow):
             "zoom-fit": has_image,
             "zoom-original": has_image,
             "zoom-toggle": has_image,
-            "edit": self.current_path is not None,
             "open-with": self.current_path is not None,
+            "show-containing": self.current_path is not None,
             "wallpaper": has_image,
             "copy-to": bool(targets),
             "move-to": bool(targets),
@@ -1637,36 +1568,6 @@ class ImageWindow(Adw.ApplicationWindow):
         view.set_zoom(zoom)
 
     # ------------------------------------------------------ external apps ---
-
-    def on_edit(self, *_):
-        path = self.current_path
-        if not path:
-            return
-        if IN_SNAP:
-            self.on_open_with()  # a Snap can't start host apps itself
-            return
-        mode = self.settings["editor_mode"]
-        try:
-            if mode == "app" and (app := find_app(self.settings["editor_app"])):
-                app.launch([Gio.File.new_for_path(path)], self.get_display().get_app_launch_context())
-                name = app.get_display_name()
-            elif mode == "custom" and self.settings["editor_command"].strip():
-                argv = GLib.shell_parse_argv(self.settings["editor_command"])[1]
-                if any("%f" in arg for arg in argv):
-                    argv = [arg.replace("%f", path) for arg in argv]
-                else:
-                    argv.append(path)
-                Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE)
-                name = os.path.basename(argv[0])
-            else:
-                toast = Adw.Toast(title="No external editor configured", button_label="Preferences",
-                                  action_name="app.preferences")
-                self.toasts.add_toast(toast)
-                return
-        except GLib.Error as e:
-            self.toast(f"Could not start editor: {e.message}")
-            return
-        self.toast(f"Opened in {name}")
 
     def on_open_with(self, *_):
         if not self.current_path:
@@ -2027,7 +1928,6 @@ class Application(Adw.Application):
             "win.zoom-out": ["<Control>minus", "<Control>KP_Subtract"],
             "win.zoom-fit": ["<Control>0", "<Control>KP_0"],
             "win.zoom-original": ["<Control>1", "<Control>KP_1"],
-            "win.edit": ["<Control>e"],
             "win.copy-to": ["<Control><Shift>c"],
             "win.move-to": ["<Control><Shift>m"],
             "win.rename": ["F2"],
