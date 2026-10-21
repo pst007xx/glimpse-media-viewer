@@ -31,6 +31,14 @@ except (ValueError, ImportError):
 else:
     GExiv2.initialize()
 
+try:
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+except (ValueError, ImportError):
+    Gst = None  # videos still play (GTK brings its own GStreamer) but get no thumbnails
+else:
+    Gst.init(None)
+
 # exiv2's XMP support isn't safe to use from several threads at once
 METADATA_LOCK = threading.Lock()
 
@@ -80,6 +88,7 @@ SHORTCUTS = [
     ]),
     ("Navigation", [
         ("Next image", "Right Page_Down space"),
+        ("Play or pause a video", "space"),
         ("Previous image", "Left Page_Up BackSpace"),
         ("First / last image", "Home End"),
         ("Toggle sidebar", "F9"),
@@ -117,6 +126,12 @@ HELP = [
              "Left/Right, Page Up/Down or Space/Backspace to step through them, Home/End for first/last."),
             ("Image details",
              "The title bar shows the file name, its position in the folder, its size in pixels and on disk."),
+        ]),
+        ("Videos", [
+            ("Play videos",
+             "Videos are listed with the images and start playing when you select them. Use the controls "
+             "at the bottom of the video to pause, seek and change the volume, or press Space to play and pause."),
+            ("Fullscreen video", "Double-click a video to watch it fullscreen."),
         ]),
         ("Zooming", [
             ("Zoom in and out",
@@ -264,8 +279,26 @@ def _supported_extensions():
 IMAGE_EXTENSIONS = _supported_extensions()
 
 
+VIDEO_EXTENSIONS = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ogv", ".mpg", ".mpeg",
+                    ".wmv", ".3gp", ".flv", ".mts", ".m2ts")
+
+
 def is_image(name):
     return name.lower().endswith(IMAGE_EXTENSIONS)
+
+
+def is_video(name):
+    return name.lower().endswith(VIDEO_EXTENSIONS)
+
+
+def is_media(name):
+    return is_image(name) or is_video(name)
+
+
+def format_duration(microseconds):
+    seconds = round(microseconds / 1_000_000)
+    hours, rest = divmod(seconds, 3600)
+    return f"{hours}:{rest // 60:02}:{rest % 60:02}" if hours else f"{rest // 60}:{rest % 60:02}"
 
 
 def plural(n, word):
@@ -301,8 +334,49 @@ def load_thumbnail(path, size):
             return GdkPixbuf.Pixbuf.new_from_file_at_scale(thumb, size, size, True)
     except GLib.Error:
         pass
+    if is_video(path):
+        return video_frame(path, size)
     pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
     return pixbuf.apply_embedded_orientation() or pixbuf
+
+
+def video_frame(path, size):
+    """A frame from a tenth of the way into a video, scaled to fit size, or None."""
+    if Gst is None:
+        return None
+    try:
+        playbin = Gst.ElementFactory.make("playbin")
+        sink = Gst.parse_bin_from_description("videoflip video-direction=auto ! videoconvert ! gdkpixbufsink name=frame", True)
+    except GLib.Error:
+        return None
+    if playbin is None:
+        return None
+    playbin.set_property("uri", GLib.filename_to_uri(path))
+    playbin.set_property("video-sink", sink)
+    playbin.set_property("flags", 1)  # video only
+
+    def wait():
+        message = playbin.get_bus().timed_pop_filtered(
+            10 * Gst.SECOND, Gst.MessageType.ASYNC_DONE | Gst.MessageType.ERROR)
+        return message is not None and message.type == Gst.MessageType.ASYNC_DONE
+
+    try:
+        playbin.set_state(Gst.State.PAUSED)
+        if not wait():
+            return None
+        ok, duration = playbin.query_duration(Gst.Format.TIME)
+        if ok and duration > 0 and playbin.seek_simple(
+                Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, duration // 10):
+            wait()
+        pixbuf = sink.get_by_name("frame").get_property("last-pixbuf")
+    finally:
+        playbin.set_state(Gst.State.NULL)
+    if pixbuf is None:
+        return None
+    width, height = pixbuf.get_width(), pixbuf.get_height()
+    scale = min(size / width, size / height)
+    return pixbuf.scale_simple(max(1, round(width * scale)), max(1, round(height * scale)),
+                               GdkPixbuf.InterpType.BILINEAR)
 
 
 _portal_requests = 0
@@ -406,7 +480,7 @@ TAG_KEYS = ("Xmp.dc.subject", "Iptc.Application2.Keywords")
 
 def open_metadata(path):
     """GExiv2 metadata for path, or None if GExiv2 is missing or can't read the file."""
-    if GExiv2 is None:
+    if GExiv2 is None or is_video(path):  # tags go in images only
         return None
     metadata = GExiv2.Metadata()
     try:
@@ -594,7 +668,7 @@ def scan_folder(folder, sort_by, show_hidden):
     except OSError:
         return items
     for entry in entries:
-        if (not show_hidden and entry.name.startswith(".")) or not is_image(entry.name):
+        if (not show_hidden and entry.name.startswith(".")) or not is_media(entry.name):
             continue
         try:
             if not entry.is_file():
@@ -1533,6 +1607,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.view = ImageView()
         self.view.connect("scale-changed", lambda *_: self._update_zoom_label())
         self.scroller = Gtk.ScrolledWindow(child=self.view)
+        self.video = Gtk.Video(hexpand=True, vexpand=True)
 
         welcome = Adw.StatusPage(icon_name="image-x-generic-symbolic", title="Open an Image",
                                  description="Or drag an image or folder onto this window")
@@ -1540,7 +1615,7 @@ class ImageWindow(Adw.ApplicationWindow):
                                     halign=Gtk.Align.CENTER, css_classes=["pill", "suggested-action"])
         welcome.set_child(welcome_button)
         self.empty_page = Adw.StatusPage(icon_name="folder-symbolic", title="No Images",
-                                         description="This folder contains no images")
+                                         description="This folder contains no images or videos")
         self.error_page = Adw.StatusPage(icon_name="image-missing-symbolic", title="Could Not Load Image")
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
@@ -1548,6 +1623,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.stack.add_named(self.empty_page, "empty")
         self.stack.add_named(self.error_page, "error")
         self.stack.add_named(self.scroller, "image")
+        self.stack.add_named(self.video, "video")
         self.stack.add_named(Adw.Spinner() if hasattr(Adw, "Spinner") else Gtk.Spinner(spinning=True,
                              halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, width_request=32,
                              height_request=32), "loading")
@@ -1701,7 +1777,8 @@ class ImageWindow(Adw.ApplicationWindow):
         if texture:
             box.thumb.set_from_paintable(texture)
         else:
-            box.thumb.set_from_icon_name("image-x-generic-symbolic")
+            box.thumb.set_from_icon_name("video-x-generic-symbolic" if is_video(item.path)
+                                         else "image-x-generic-symbolic")
 
     def _row_unbind(self, factory, list_item):
         list_item.get_child().item = None
@@ -1779,9 +1856,9 @@ class ImageWindow(Adw.ApplicationWindow):
         if node is None:
             return False
         paths = [f.get_path() for f in value.get_files() if f.get_path()]
-        images = [p for p in paths if os.path.isfile(p) and is_image(os.path.basename(p))]
+        images = [p for p in paths if os.path.isfile(p) and is_media(os.path.basename(p))]
         if not images:
-            self.toast("Only images can be dropped onto a folder")
+            self.toast("Only images and videos can be dropped onto a folder")
             return False
         self._transfer(images, node.path, self._drop_action(target) == Gdk.DragAction.MOVE)
         return True
@@ -1993,6 +2070,12 @@ class ImageWindow(Adw.ApplicationWindow):
         context = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
         context.connect("pressed", lambda g, n, x, y: self.current_path and self._popup(self.image_menu, x, y))
         self.scroller.add_controller(context)
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda g, n, x, y: n == 2 and self.actions["fullscreen"].activate(None))
+        self.video.add_controller(click)
+        context = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        context.connect("pressed", lambda g, n, x, y: self.current_path and self._popup(self.image_menu, x, y))
+        self.video.add_controller(context)
 
         # Drag and drop files from Files
         drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
@@ -2028,6 +2111,10 @@ class ImageWindow(Adw.ApplicationWindow):
             action = "zoom-in"
         elif name in ("minus", "underscore", "KP_Subtract"):
             action = "zoom-out"
+        elif name == "space" and self.video.get_media_stream():
+            stream = self.video.get_media_stream()
+            stream.set_playing(not stream.get_playing())
+            return True
         elif name == "Escape" and self.is_fullscreen():
             self.unfullscreen()
             return True
@@ -2076,9 +2163,10 @@ class ImageWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------ opening ---
 
     def on_open(self, *_):
-        dialog = Gtk.FileDialog(title="Open Image", modal=True)
-        image_filter = Gtk.FileFilter(name="Images")
+        dialog = Gtk.FileDialog(title="Open Image or Video", modal=True)
+        image_filter = Gtk.FileFilter(name="Images and Videos")
         image_filter.add_pixbuf_formats()
+        image_filter.add_mime_type("video/*")
         filters = Gio.ListStore(item_type=Gtk.FileFilter)
         filters.append(image_filter)
         dialog.set_filters(filters)
@@ -2200,6 +2288,7 @@ class ImageWindow(Adw.ApplicationWindow):
         if not items:
             self.current_path = None
             self.view.set_texture(None)
+            self.stop_video()
             self.stack.set_visible_child_name("empty")
             self.update_title()
             self.update_actions()
@@ -2275,6 +2364,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.sidebar_title.set_title(APP_NAME)
         self.sidebar_title.set_subtitle("")
         self.view.set_texture(None)
+        self.stop_video()
         self.stack.set_visible_child_name("welcome")
         self.update_title()
         self.update_actions()
@@ -2398,6 +2488,13 @@ class ImageWindow(Adw.ApplicationWindow):
         self.current_mtime = item.mtime
         self.load_generation += 1
         generation = self.load_generation
+        self.stop_video()
+        if is_video(path):
+            self.view.set_texture(None)
+            self.play_video(path)
+            self.update_title()
+            self.update_actions()
+            return
         if not same:
             self.view.set_texture(None)
             self.stack.set_visible_child_name("loading")
@@ -2409,6 +2506,7 @@ class ImageWindow(Adw.ApplicationWindow):
             if error is not None:
                 self.view.set_texture(None)
                 message = error.message if isinstance(error, GLib.Error) else str(error)
+                self.error_page.set_title("Could Not Load Image")
                 self.error_page.set_description(GLib.markup_escape_text(message))
                 self.stack.set_visible_child_name("error")
             else:
@@ -2419,6 +2517,29 @@ class ImageWindow(Adw.ApplicationWindow):
 
         run_in_thread(lambda: load_pixbuf(path), done)
 
+    def play_video(self, path):
+        stream = Gtk.MediaFile.new_for_filename(path)
+        stream.connect("notify::error", self._on_video_error)
+        stream.connect("notify::prepared", lambda *_: self.update_title())
+        self.video.set_media_stream(stream)
+        stream.play()
+        self.stack.set_visible_child_name("video")
+
+    def _on_video_error(self, stream, _pspec):
+        if stream is not self.video.get_media_stream() or stream.get_error() is None:
+            return
+        # GStreamer's message starts "Error from element /GstPlayBin:…: <reason>" and adds debug lines
+        reason = stream.get_error().message.split("\n")[0].rpartition(": ")[2]
+        self.error_page.set_title("Could Not Play Video")
+        self.error_page.set_description(GLib.markup_escape_text(reason))
+        self.stack.set_visible_child_name("error")
+
+    def stop_video(self):
+        stream = self.video.get_media_stream()
+        if stream:
+            stream.pause()
+            self.video.set_media_stream(None)
+
     def update_title(self):
         index = self.path_index.get(self.current_path)
         if index is None:
@@ -2428,8 +2549,14 @@ class ImageWindow(Adw.ApplicationWindow):
             return
         item = self.store.get_item(index)
         parts = [f"{index + 1} / {self.store.get_n_items()}"]
+        stream = self.video.get_media_stream()
         if self.view.texture is not None:
             parts.append(f"{self.view.texture.get_width()} × {self.view.texture.get_height()}")
+        elif stream is not None and stream.is_prepared():
+            if stream.get_intrinsic_width():
+                parts.append(f"{stream.get_intrinsic_width()} × {stream.get_intrinsic_height()}")
+            if stream.get_duration():
+                parts.append(format_duration(stream.get_duration()))
         parts.append(GLib.format_size(item.size))
         self.title.set_title(item.display_name)
         self.title.set_subtitle("  ·  ".join(parts))
@@ -2830,6 +2957,7 @@ class ImageWindow(Adw.ApplicationWindow):
             self.split.set_show_sidebar(self.sidebar_before_fullscreen)
 
     def _on_close(self, *_):
+        self.stop_video()
         if self.monitor:
             self.monitor.cancel()
         self.settings.disconnect(self.settings_handler)

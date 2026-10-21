@@ -7,6 +7,7 @@ description: |
   Image2-Viewer is a simple image viewer and organiser that fits right into GNOME.
 
   * Browse every image in a folder, with thumbnails in the sidebar
+  * Play videos right in the main window
   * Zoom with buttons, keyboard, Ctrl+scroll or pinch
   * Pin folders to the sidebar and drag images onto them to organise,
     with undo and Alt+1…9 quick-move keys
@@ -35,11 +36,14 @@ apps:
     plugs:
       - home             # browse and organise images in your home folder
       - removable-media   # /media and /mnt (connect manually: snap connect image2-viewer:removable-media)
+      - audio-playback    # sound for videos
     environment:
       PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
       # GTK's own file dialog and drag-and-drop see real paths (with the home plug),
       # so opening an image can show its whole folder. See IN_SNAP in image2.py.
       GDK_DEBUG: no-portals
+      # GTK finds its video module (media/libmedia-gstreamer.so, from the video part) here
+      GTK_PATH: $SNAP/usr/lib/x86_64-linux-gnu/gtk-4.0
 
 slots:
   dbus-image2:
@@ -67,3 +71,36 @@ parts:
           -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/io.github.imagery.Image2.svg|' \
           io.github.imagery.Image2.desktop \
           > "$CRAFT_PART_INSTALL/usr/share/applications/io.github.imagery.Image2.desktop"
+
+  # The GNOME platform has GStreamer but not GTK's GStreamer video module or the libav
+  # decoders (H.264, HEVC…, what most cameras and phones record). Keep just those and the
+  # libraries the platform lacks: the rest of these packages' dependencies (GTK, GLib,
+  # libavcodec…) are already in the platform, and copies here would shadow them.
+  video:
+    plugin: nil
+    stage-packages:
+      - libgtk-4-media-gstreamer
+      - gstreamer1.0-libav
+    prime:
+      - usr/lib/*/gtk-4.0/4.0.0/media
+      - usr/lib/*/gstreamer-1.0/libgstlibav.so
+      - usr/lib/*/libavfilter.so.9*
+      - usr/lib/*/libpostproc.so.57*
+      - usr/lib/*/libass.so.9*
+      - usr/lib/*/libbs2b.so.0*
+      - usr/lib/*/libfftw3.so.3*
+      - usr/lib/*/libflite*.so.1*
+      - usr/lib/*/liblilv-0.so.0*
+      - usr/lib/*/libmysofa.so.1*
+      - usr/lib/*/libplacebo.so.338*
+      - usr/lib/*/libpocketsphinx.so.3*
+      - usr/lib/*/librubberband.so.2*
+      - usr/lib/*/libsamplerate.so.0*
+      - usr/lib/*/libserd-0.so.0*
+      - usr/lib/*/libsord-0.so.0*
+      - usr/lib/*/libsphinxbase.so.3*
+      - usr/lib/*/libsratom-0.so.0*
+      - usr/lib/*/libunibreak.so.5*
+      - usr/lib/*/libvidstab.so.1.1*
+      - usr/lib/*/libzimg.so.2*
+      - usr/lib/*/libzix-0.so.0*
