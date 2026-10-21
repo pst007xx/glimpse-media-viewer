@@ -247,13 +247,47 @@ class HelpDialog(Adw.PreferencesDialog):
         for page_title, icon, groups in HELP:
             page = Adw.PreferencesPage(title=page_title, icon_name=icon)
             for group_title, rows in groups:
-                group = Adw.PreferencesGroup(title=group_title)
+                group = Adw.PreferencesGroup(title=GLib.markup_escape_text(group_title))
                 for title, text in rows:
-                    row = Adw.ActionRow(title=title, subtitle=GLib.markup_escape_text(text),
+                    row = Adw.ActionRow(title=GLib.markup_escape_text(title), subtitle=GLib.markup_escape_text(text),
                                         subtitle_selectable=True)
                     group.add(row)
                 page.add(group)
             self.add(page)
+        self.add(file_types_page())
+
+
+# Friendlier names for some of the pixbuf loaders' own descriptions
+FORMAT_NAMES = {
+    "The WebP image format": "WebP",
+    "MacOS X icon": "macOS Icon",
+    "HEIF/AVIF Image": "HEIF and AVIF",
+    "PNM/PBM/PGM/PPM": "Netpbm (PNM, PBM, PGM, PPM)",
+    "QuickTime": "QuickTime Image",
+    "Windows animated cursor": "Windows Animated Cursor",
+    "Windows icon": "Windows Icon",
+    "Scalable Vector Graphics": "SVG",
+}
+
+
+def file_types_page():
+    """Help page listing the formats this copy can open: images depend on the installed pixbuf loaders."""
+    page = Adw.PreferencesPage(title="File Types", icon_name="text-x-generic-symbolic")
+
+    def group(title, description, rows):
+        group = Adw.PreferencesGroup(title=title, description=description)
+        for name, extensions in rows:
+            group.add(Adw.ActionRow(title=GLib.markup_escape_text(name),
+                                    subtitle=", ".join("." + ext for ext in extensions), subtitle_selectable=True))
+        page.add(group)
+
+    formats = [(FORMAT_NAMES.get(f.get_description(), f.get_description()), f.get_extensions())
+               for f in GdkPixbuf.Pixbuf.get_formats()]
+    group("Images", "Tags can be saved in JPEG, PNG, TIFF and WebP images.",
+          sorted(formats, key=lambda f: f[0].casefold()))
+    group("Videos", "Video: H.264, HEVC (H.265), VP8, VP9, MPEG-4, MPEG-2 and Windows Media. "
+          "Sound: AAC, MP3, Opus, Vorbis, FLAC and AC-3. AV1 video isn't supported.", VIDEO_FORMATS)
+    return page
 
 
 CSS = """
@@ -279,8 +313,20 @@ def _supported_extensions():
 IMAGE_EXTENSIONS = _supported_extensions()
 
 
-VIDEO_EXTENSIONS = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ogv", ".mpg", ".mpeg",
-                    ".wmv", ".3gp", ".flv", ".mts", ".m2ts")
+VIDEO_FORMATS = [
+    ("MPEG-4", ["mp4", "m4v"]),
+    ("QuickTime", ["mov"]),
+    ("Matroska", ["mkv"]),
+    ("WebM", ["webm"]),
+    ("AVI", ["avi"]),
+    ("Ogg Video", ["ogv"]),
+    ("MPEG", ["mpg", "mpeg"]),
+    ("Windows Media", ["wmv"]),
+    ("3GP", ["3gp"]),
+    ("Flash Video", ["flv"]),
+    ("AVCHD", ["mts", "m2ts"]),
+]
+VIDEO_EXTENSIONS = tuple("." + ext for _, extensions in VIDEO_FORMATS for ext in extensions)
 
 
 def is_image(name):
