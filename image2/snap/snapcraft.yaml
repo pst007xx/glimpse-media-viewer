@@ -89,7 +89,7 @@ parts:
       - usr/lib/*/libass.so.9*
       - usr/lib/*/libbs2b.so.0*
       - usr/lib/*/libfftw3.so.3*
-      - usr/lib/*/libflite*.so.1*
+      - usr/lib/*/libflite*.so.*   # .so.1 links to .so.2.2
       - usr/lib/*/liblilv-0.so.0*
       - usr/lib/*/libmysofa.so.1*
       - usr/lib/*/libplacebo.so.338*
@@ -104,3 +104,12 @@ parts:
       - usr/lib/*/libvidstab.so.1.1*
       - usr/lib/*/libzimg.so.2*
       - usr/lib/*/libzix-0.so.0*
+      - usr/lib/*/blas
+      - usr/lib/*/lapack
+    # Debian links libblas.so.3 and liblapack.so.3 into place with update-alternatives,
+    # which never runs for stage packages
+    override-prime: |
+      craftctl default
+      cd "$CRAFT_PRIME/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR"
+      ln -sf blas/libblas.so.3 libblas.so.3
+      ln -sf lapack/liblapack.so.3 liblapack.so.3
