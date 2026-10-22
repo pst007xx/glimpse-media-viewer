@@ -177,6 +177,11 @@ HELP = [
              "Click + above Folders, choose Pin Current Folder to Sidebar in the main menu, or drag folders "
              "from Files onto the Folders list. Your Pictures folder is pinned the first time Glimpse starts."),
             ("Browse subfolders", "Expand a folder with its arrow; click any folder to show its images."),
+            ("Manage pinned folders",
+             "Choose Manage Pinned Folders… in the main menu or a folder's right-click menu to see them "
+             "all, add more, unpin one, or change their order with the arrows. Alt+1…9 moves files into "
+             "the folder at that position. A folder on a disconnected drive is marked with a warning and "
+             "comes back when the drive does."),
             ("Folder menu",
              "Right-click a folder to open it, show it in Files, move or copy the selected images into it, "
              "create a new subfolder, or pin/unpin it."),
@@ -1256,10 +1261,11 @@ class ImageView(Gtk.Widget):
 # ----------------------------------------------------------------------------
 
 class PreferencesDialog(Adw.PreferencesDialog):
-    def __init__(self, settings):
+    def __init__(self, settings, add_folders=None, page_name=None):
+        """add_folders(): asks for folders to pin. page_name "pinned" opens on Pinned Folders."""
         super().__init__(title="Preferences")
         self.settings = settings
-        page = Adw.PreferencesPage(title="General", icon_name="preferences-system-symbolic")
+        page = Adw.PreferencesPage(title="General", icon_name="preferences-system-symbolic", name="general")
         self.add(page)
 
         # Files
@@ -1279,6 +1285,67 @@ class PreferencesDialog(Adw.PreferencesDialog):
         sort_row.connect("notify::selected",
                          lambda row, _: settings.__setitem__("sort_by", keys[row.get_selected()]))
         sidebar.add(sort_row)
+
+        # Pinned folders: add, remove and reorder (the order is what Alt+1…9 uses)
+        pinned_page = Adw.PreferencesPage(title="Pinned Folders", icon_name="folder-symbolic", name="pinned")
+        self.add(pinned_page)
+        self.pinned = Adw.PreferencesGroup(
+            title="Pinned Folders",
+            description="Shown under Folders in the sidebar. Alt+1…9 moves files into the folder at that "
+                        "position, and Ctrl+Alt+1…9 copies them.")
+        if add_folders:
+            add = Gtk.Button(child=Adw.ButtonContent(icon_name="list-add-symbolic", label="_Add…",
+                                                     use_underline=True),
+                             valign=Gtk.Align.CENTER, css_classes=["flat"], tooltip_text="Pin Folders")
+            add.connect("clicked", lambda *_: add_folders())
+            self.pinned.set_header_suffix(add)
+        pinned_page.add(self.pinned)
+        self.pinned_rows = []
+        self._show_pinned()
+        handler = settings.connect("changed", lambda s, key: key == "folders" and self._show_pinned())
+        self.connect("closed", lambda *_: settings.disconnect(handler))
+        if page_name:
+            self.set_visible_page_name(page_name)
+
+    def _show_pinned(self):
+        for row in self.pinned_rows:
+            self.pinned.remove(row)
+        folders = self.settings["folders"]
+        self.pinned_rows = []
+        if not folders:
+            row = Adw.ActionRow(title="No pinned folders",
+                                subtitle="Click Add to pin folders you use often, such as your photo library.")
+            self.pinned_rows.append(row)
+            self.pinned.add(row)
+            return
+        for index, path in enumerate(folders):
+            available = os.path.isdir(path)
+            row = Adw.ActionRow(title=GLib.markup_escape_text(GLib.filename_display_basename(path) or path),
+                                subtitle=GLib.markup_escape_text(GLib.filename_display_name(path)
+                                                                 + ("" if available else " — not available; is the drive connected?")),
+                                subtitle_selectable=True)
+            row.add_prefix(Gtk.Label(label=str(index + 1) if index < 9 else "", width_chars=1,
+                                     css_classes=["dim-label", "numeric"]))
+            row.add_prefix(Gtk.Image(icon_name="folder-symbolic" if available else "dialog-warning-symbolic"))
+            for icon, tip, target, sensitive in (
+                    ("go-up-symbolic", "Move Up", index - 1, index > 0),
+                    ("go-down-symbolic", "Move Down", index + 1, index < len(folders) - 1)):
+                button = Gtk.Button(icon_name=icon, tooltip_text=tip, valign=Gtk.Align.CENTER,
+                                    sensitive=sensitive, css_classes=["flat"])
+                button.connect("clicked", lambda b, i=index, t=target: self._move_pinned(i, t))
+                row.add_suffix(button)
+            remove = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Unpin", valign=Gtk.Align.CENTER,
+                                css_classes=["flat"])
+            remove.connect("clicked", lambda b, p=path: self.settings.__setitem__(
+                "folders", [f for f in self.settings["folders"] if f != p]))
+            row.add_suffix(remove)
+            self.pinned_rows.append(row)
+            self.pinned.add(row)
+
+    def _move_pinned(self, index, target):
+        folders = list(self.settings["folders"])
+        folders.insert(target, folders.pop(index))
+        self.settings["folders"] = folders
 
     def _switch(self, title, subtitle, key):
         row = Adw.SwitchRow(title=title, active=self.settings[key])
@@ -1836,6 +1903,7 @@ class ImageWindow(Adw.ApplicationWindow):
         menu.append_section(None, section)
         section = Gio.Menu()
         section.append("Fullscreen", "win.fullscreen")
+        section.append("Manage Pinned Folders…", "win.manage-folders")
         section.append("Preferences", "app.preferences")
         menu.append_section(None, section)
         section = Gio.Menu()
@@ -2108,6 +2176,9 @@ class ImageWindow(Adw.ApplicationWindow):
             menu.append_section(None, section(("Unpin from Sidebar", "win.unpin-folder")))
         else:
             menu.append_section(None, section(("Pin to Sidebar", "win.pin-folder")))
+        manage = Gio.Menu()
+        manage.append("Manage Pinned Folders…", "win.manage-folders")
+        menu.append_section(None, manage)
         self.folder_menu.set_menu_model(menu)
         ok, point = box.compute_point(self.folder_view, Graphene.Point().init(x, y))
         self._popup(self.folder_menu, point.x if ok else x, point.y if ok else y)
@@ -2225,6 +2296,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "toggle-sidebar": lambda *_: self.split.set_show_sidebar(not self.split.get_show_sidebar()),
             "fullscreen": lambda *_: self.unfullscreen() if self.is_fullscreen() else self.fullscreen(),
             "add-folder": self.on_add_folder,
+            "manage-folders": lambda *_: self.get_application().on_preferences(page_name="pinned"),
             "pin-current": lambda *_: self.pin_folders([self.folder]) or self.toast("Folder is already pinned"),
         }
         # Actions with a string parameter: a folder path, or for wallpaper a style
@@ -3314,8 +3386,10 @@ class Application(Adw.Application):
             self.tag_index.close()
         Adw.Application.do_shutdown(self)
 
-    def on_preferences(self, *_):
-        PreferencesDialog(self.settings).present(self.get_active_window())
+    def on_preferences(self, *_, page_name=None):
+        window = self.get_active_window()
+        add = getattr(window, "on_add_folder", None)
+        PreferencesDialog(self.settings, add, page_name).present(window)
 
     def on_help(self, *_):
         HelpDialog().present(self.get_active_window())
