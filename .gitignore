@@ -1,5 +1,5 @@
 __pycache__/
 *.snap
-glimpse-media-viewer/parts/
-glimpse-media-viewer/stage/
-glimpse-media-viewer/prime/
+parts/
+stage/
+prime/

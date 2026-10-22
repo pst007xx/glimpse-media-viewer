@@ -40,12 +40,15 @@ description: |
   snap connect glimpse-media-viewer:removable-media
 grade: stable
 confinement: strict
+# GTK_PATH below and the video part's libraries are for 64-bit PCs
+platforms:
+  amd64:
 license: GPL-3.0-or-later
 contact: https://github.com/pst007xx/glimpse-media-viewer
 website: https://github.com/pst007xx/glimpse-media-viewer
 source-code: https://github.com/pst007xx/glimpse-media-viewer
 issues: https://github.com/pst007xx/glimpse-media-viewer/issues
-icon: icons/io.github.pst007xx.Glimpse-256.png
+icon: glimpse-media-viewer/icons/io.github.pst007xx.Glimpse-256.png
 
 apps:
   glimpse-media-viewer:
@@ -78,7 +81,7 @@ slots:
 parts:
   glimpse:
     plugin: nil
-    source: .
+    source: glimpse-media-viewer   # the app's files; this file sits at the top so the build service finds it
     stage-packages:
       - python3
       - python3-gi
