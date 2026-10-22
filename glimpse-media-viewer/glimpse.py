@@ -232,12 +232,23 @@ HELP = [
              "it to the rest."),
             ("Search your pinned folders",
              "Press Ctrl+F or use the search button by Folders. Search looks through every pinned folder and "
-             "its subfolders. Type part of a name, choose a type (images, videos, music or one format), a "
-             "date range for when photos were taken or files were last modified, and tick tags, choosing whether files need any "
-             "or all of them. Use as many of these as you like together, then Show Files. The list then "
-             "holds every match, with each file's folder under its name. Click a folder, or the × by Files, "
-             "to go back. The first search on a big collection indexes it in the background, which can take "
-             "a while; after that only new and changed files are read."),
+             "its subfolders. Type part of a name, choose a type (images, videos, music or one format), pick "
+             "a date range and tick tags. Use as many of these as you like together: a file has to match all "
+             "of them. Show Files then lists every match, with each file's folder under its name. Click a "
+             "folder, or the × by Files, to go back. Clear starts a new search. The first search on a big "
+             "collection indexes it in the background, which can take a while; after that only new and "
+             "changed files are read."),
+            ("Search by tag: Any or All",
+             "Tick one or more tags, then choose under Show Files With. Any Ticked Tag finds files with at "
+             "least one of the ticked tags: Beach and Sea finds files tagged Beach, files tagged Sea and files "
+             "with both, so each tag you tick finds more. All Ticked Tags finds only files that have every "
+             "ticked tag: Beach and Sea finds just the files with both, so each tag you tick finds fewer. The "
+             "line under Show Files With spells out the current choice, and the Show button counts the files."),
+            ("Search by date",
+             "Choose Today, Past 7 Days, Past 30 Days, Past Year or Custom Range, which adds From and To "
+             "calendars. Which Date picks the date to use. Date Taken is when a photo was taken, read from its "
+             "camera details; videos, music and images without that date don't match. Date Modified is when "
+             "a file was last changed, which every file has."),
             ("Show and sort by tag",
              "Each image's tags appear under its name. Use the menu next to Images to show only the images "
              "with one tag, or the untagged ones, and to sort by name, date modified or tag."),
@@ -1990,6 +2001,21 @@ class SearchDialog(Adw.PreferencesDialog):
         return not (search["folded"] or search["name"] or search["extensions"]
                     or search["start"] is not None or search["end"] is not None)
 
+    def _describe_match(self, tags, match_all):
+        """Say what Any or All means, with the ticked tags as the example."""
+        if not tags:
+            self.match_row.set_subtitle("Any: files with at least one ticked tag. All: only files with every one.")
+            return
+        if len(tags) == 1:
+            self.match_row.set_subtitle(GLib.markup_escape_text(f"Files tagged {tags[0]}"))
+            return
+        listed = ", ".join(tags[:-1]) + (" and " if match_all else " or ") + tags[-1]
+        if match_all:
+            text = f"Only files tagged with {'both' if len(tags) == 2 else 'all of'} {listed}"
+        else:
+            text = f"Files tagged {', '.join(tags)} or both" if len(tags) == 2 else f"Files tagged with any of {listed}"
+        self.match_row.set_subtitle(GLib.markup_escape_text(text))
+
     def _update_button(self, later=False):
         if self.count_source:
             GLib.source_remove(self.count_source)
@@ -1998,6 +2024,7 @@ class SearchDialog(Adw.PreferencesDialog):
             self.count_source = GLib.timeout_add(250, self._update_button)
             return False
         search = self._search()
+        self._describe_match(search["tags"], search["all"])
         if self._is_empty(search) or not self.roots:
             self.show_button.set_label("Show Files")
             self.show_button.set_sensitive(False)
