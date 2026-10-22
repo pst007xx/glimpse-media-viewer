@@ -3274,10 +3274,19 @@ class ImageWindow(Adw.ApplicationWindow):
             self.tag_index.move([(path, new_path)])
             self.rescan(select_path=new_path)
 
-        self._name_dialog("Rename Image", folder, os.path.basename(path), "_Rename", rename)
+        self._name_dialog("Rename", folder, os.path.basename(path), "_Rename", rename, keep_extension=True)
 
-    def _name_dialog(self, heading, folder, old_name, accept_label, on_accept):
-        """Ask for a new file name in folder; on_accept(name) runs for a valid, unused name."""
+    def _name_dialog(self, heading, folder, old_name, accept_label, on_accept, keep_extension=False):
+        """Ask for a new file name in folder; on_accept(name) runs for a valid, unused name.
+        keep_extension: a name typed without an image, video or music extension keeps old_name's."""
+        extension = os.path.splitext(old_name)[1] if keep_extension else ""
+
+        def final(text):
+            name = text.strip()
+            if extension and name and not is_media(name):
+                name += extension  # "Another_Name" stays a .jpg
+            return name
+
         dialog = Adw.AlertDialog(heading=heading)
         entry = Gtk.Entry(text=GLib.filename_display_name(old_name), activates_default=True)
         hint = Gtk.Label(css_classes=["caption", "error"], visible=False, wrap=True)
@@ -3292,7 +3301,7 @@ class ImageWindow(Adw.ApplicationWindow):
         dialog.set_close_response("cancel")
 
         def validate(*_):
-            name = entry.get_text().strip()
+            name = final(entry.get_text())
             problem = None
             if not name or name in (".", ".."):
                 problem = ""
@@ -3300,8 +3309,13 @@ class ImageWindow(Adw.ApplicationWindow):
                 problem = "Names can't contain “/”"
             elif name != old_name and os.path.lexists(os.path.join(folder, name)):
                 problem = "Something with that name already exists here"
-            hint.set_label(problem or "")
-            hint.set_visible(bool(problem))
+            if problem is None and name != entry.get_text().strip():
+                hint.set_label(f"Will be renamed to “{name}”")
+                hint.set_css_classes(["caption", "dim-label"])
+            else:
+                hint.set_label(problem or "")
+                hint.set_css_classes(["caption", "error"])
+            hint.set_visible(bool(hint.get_label()))
             if problem is None:
                 entry.remove_css_class("error")
             else:
@@ -3310,7 +3324,7 @@ class ImageWindow(Adw.ApplicationWindow):
 
         entry.connect("changed", validate)
         validate()
-        dialog.connect("response", lambda d, r: r == "accept" and on_accept(entry.get_text().strip()))
+        dialog.connect("response", lambda d, r: r == "accept" and on_accept(final(entry.get_text())))
         dialog.present(self)
 
         def select_stem():
