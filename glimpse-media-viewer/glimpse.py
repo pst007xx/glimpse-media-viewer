@@ -3,6 +3,7 @@
 # Copyright (C) 2026 Salvatore Turone
 """Glimpse Image Viewer — view and organise images, videos and music, built with GTK 4 and libadwaita."""
 
+import datetime
 import filecmp
 import json
 import math
@@ -47,7 +48,7 @@ METADATA_LOCK = threading.Lock()
 
 APP_ID = "io.github.pst007xx.Glimpse"
 APP_NAME = "Glimpse Image Viewer"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
 # dialogs and drag-and-drop give real paths; host apps are reached via portal_open().
@@ -117,7 +118,7 @@ SHORTCUTS = [
         ("Rename", "F2"),
         ("Delete", "Delete"),
         ("Properties and tags", "<Alt>Return"),
-        ("Find images by tag", "<Control>f"),
+        ("Search pinned folders", "<Control>f"),
     ]),
 ]
 
@@ -229,12 +230,14 @@ HELP = [
              "Select images (Ctrl+click, Shift+click or Ctrl+A), then open Properties. Tags you add, rename or "
              "remove change in every selected image. A tag only some of them have shows how many, and + adds "
              "it to the rest."),
-            ("Find by tag in all folders",
-             "Press Ctrl+F or use the search button by Folders, tick one or more tags, choose whether images "
-             "need any or all of them, then Show Images. The list then holds every matching image from your "
-             "pinned folders and their subfolders, with each image's folder under its name. Click a folder, "
-             "or the × by Images, to go back. The first search on a big collection indexes it in the "
-             "background, which can take a while; after that only new and changed images are read."),
+            ("Search your pinned folders",
+             "Press Ctrl+F or use the search button by Folders. Search looks through every pinned folder and "
+             "its subfolders. Type part of a name, choose a type (images, videos, music or one format), a "
+             "date range for when photos were taken or files were last modified, and tick tags, choosing whether files need any "
+             "or all of them. Use as many of these as you like together, then Show Files. The list then "
+             "holds every match, with each file's folder under its name. Click a folder, or the × by Files, "
+             "to go back. The first search on a big collection indexes it in the background, which can take "
+             "a while; after that only new and changed files are read."),
             ("Show and sort by tag",
              "Each image's tags appear under its name. Use the menu next to Images to show only the images "
              "with one tag, or the untagged ones, and to sort by name, date modified or tag."),
@@ -391,6 +394,42 @@ def is_audio(name):
 
 def is_media(name):
     return is_image(name) or is_video(name) or is_audio(name)
+
+
+def search_types():
+    """[(label, extensions)] for Search's Type menu: everything, each kind, then each format."""
+    images = sorted(((FORMAT_NAMES.get(f.get_description(), f.get_description()),
+                      tuple("." + ext.lower() for ext in f.get_extensions()))
+                     for f in GdkPixbuf.Pixbuf.get_formats()), key=lambda f: f[0].casefold())
+    return ([("All Types", None), ("Images", IMAGE_EXTENSIONS), ("Videos", VIDEO_EXTENSIONS),
+             ("Music", AUDIO_EXTENSIONS)]
+            + [(f"Image: {name}", extensions) for name, extensions in images]
+            + [(f"Video: {name}", tuple("." + ext for ext in extensions)) for name, extensions in VIDEO_FORMATS]
+            + [(f"Music: {name}", tuple("." + ext for ext in extensions)) for name, extensions in AUDIO_FORMATS])
+
+
+DATE_KINDS = [("taken", "Date Taken"), ("mtime", "Date Modified")]
+DATE_RANGES = ["Any Time", "Today", "Past 7 Days", "Past 30 Days", "Past Year", "Custom Range"]
+CUSTOM_RANGE = 5
+
+
+def date_bounds(choice, first=None, last=None):
+    """(start, end) time limits in nanoseconds for a DATE_RANGES choice; None is open-ended."""
+    today = datetime.date.today()
+    back = {1: 0, 2: 6, 3: 29, 4: 364}
+    if choice in back:
+        first, last = today - datetime.timedelta(days=back[choice]), today
+    elif choice != CUSTOM_RANGE:
+        return None, None
+
+    def ns(day):
+        return int(datetime.datetime.combine(day, datetime.time()).timestamp()) * 1_000_000_000
+
+    return (ns(first) if first else None, ns(last + datetime.timedelta(days=1)) if last else None)
+
+
+def format_day(day):
+    return f"{day.day} {day.strftime('%b %Y')}"
 
 
 def format_duration(microseconds):
@@ -690,6 +729,22 @@ def _write_tags(path, tags):
     metadata.save_file(path)
 
 
+TAKEN_KEYS = ("Exif.Photo.DateTimeOriginal", "Exif.Photo.DateTimeDigitized", "Exif.Image.DateTime")
+
+
+def read_taken(metadata):
+    """When the photo was taken, in nanoseconds since 1970 (local time), or None if it doesn't say."""
+    for key in TAKEN_KEYS:
+        try:
+            value = metadata.try_get_tag_string(key) if metadata.try_has_tag(key) else None
+            date, clock = (value or "").strip().split(" ", 1)
+            stamp = datetime.datetime(*map(int, date.split(":")), *map(int, clock.split(":")[:3]))
+            return int(stamp.timestamp()) * 1_000_000_000
+        except (GLib.Error, ValueError, TypeError, OverflowError, OSError):
+            continue
+    return None
+
+
 def camera_details(metadata):
     """[(label, value)] for the EXIF details worth showing, skipping missing ones."""
     def text(key):
@@ -864,12 +919,13 @@ def sort_by_tag(items):
     return sorted(items, key=key)
 
 
-def read_file_tags(path):
+def read_file_info(path):
+    """(tags, date taken) of an image; ([], None) for files that can't say."""
     metadata = open_metadata(path)
     if metadata is None:
-        return []
+        return [], None
     with METADATA_LOCK:
-        return read_tags(metadata)
+        return read_tags(metadata), read_taken(metadata)
 
 
 def _storable(path):
@@ -921,6 +977,10 @@ class TagIndex:
             CREATE INDEX IF NOT EXISTS image_tags_folded ON image_tags (folded);
             CREATE INDEX IF NOT EXISTS image_tags_path ON image_tags (path);
         """)
+        if "taken" not in [column[1] for column in db.execute("PRAGMA table_info(images)")]:
+            with db:  # added in 1.0.2: forget the modified times so every file is read again for its date
+                db.execute("ALTER TABLE images ADD COLUMN taken INTEGER")
+                db.execute("UPDATE images SET mtime = NULL")
         return db
 
     def close(self):
@@ -953,7 +1013,7 @@ class TagIndex:
             for path, mtime, size in todo:
                 if generation != self.generation:
                     break
-                found.append((path, mtime, size, read_file_tags(path)))
+                found.append((path, mtime, size, *read_file_info(path)))
             return found
 
         def finished(found, error):
@@ -967,13 +1027,13 @@ class TagIndex:
     # Changes
 
     def store(self, entries):
-        """Save [(path, mtime, size, tags)]."""
+        """Save [(path, mtime, size, tags, taken)]."""
         with self.db:
-            for path, mtime, size, tags in entries:
+            for path, mtime, size, tags, taken in entries:
                 if not _storable(path):
                     continue
-                self.db.execute("INSERT OR REPLACE INTO images VALUES (?, ?, ?, ?)",
-                                (path, mtime, size, json.dumps(tags)))
+                self.db.execute("INSERT OR REPLACE INTO images (path, mtime, size, tags, taken) "
+                                "VALUES (?, ?, ?, ?, ?)", (path, mtime, size, json.dumps(tags), taken))
                 self.db.execute("DELETE FROM image_tags WHERE path = ?", (path,))
                 self.db.executemany("INSERT INTO image_tags VALUES (?, ?, ?)",
                                     [(path, tag, tag.casefold()) for tag in tags])
@@ -986,7 +1046,7 @@ class TagIndex:
                 st = os.stat(path)
             except OSError:
                 continue
-            entries.append((path, st.st_mtime_ns, st.st_size, tags))
+            entries.append((path, st.st_mtime_ns, st.st_size, tags, read_file_info(path)[1]))
         self.store(entries)
 
     def remove(self, paths):
@@ -1012,7 +1072,7 @@ class TagIndex:
         where, params = _under(roots)
         return dict(self.db.execute(f"SELECT path, mtime FROM images WHERE {where}", params))
 
-    def count_images(self, roots):
+    def count_files(self, roots):
         where, params = _under(roots)
         return self.db.execute(f"SELECT COUNT(*) FROM images WHERE {where}", params).fetchone()[0]
 
@@ -1028,26 +1088,43 @@ class TagIndex:
                 f"GROUP BY path HAVING COUNT(DISTINCT folded) >= ?",
                 list(folded) + params + [len(folded) if match_all else 1])
 
-    def count(self, folded, match_all, roots):
-        query, params = self._matching(folded, match_all, roots)
-        return self.db.execute(f"SELECT COUNT(*) FROM ({query})", params).fetchone()[0]
+    def find(self, roots, folded=(), match_all=False, start=None, end=None, by="mtime"):
+        """[(path, mtime, size, tags)] in roots with any (or all) of the folded tags, whose
+        date by ("mtime", modified, or "taken") is in [start, end)."""
+        assert by in ("mtime", "taken")
+        where, params = _under(roots)
+        query = f"SELECT path, mtime, size, tags FROM images WHERE ({where})"
+        if folded:
+            matching, more = self._matching(folded, match_all, roots)
+            query += f" AND path IN ({matching})"
+            params += more
+        if start is not None:
+            query += f" AND {by} >= ?"
+            params.append(start)
+        if end is not None:
+            query += f" AND {by} < ?"
+            params.append(end)
+        return [(path, mtime, size, json.loads(tags)) for path, mtime, size, tags in self.db.execute(query, params)]
 
-    def search(self, folded, match_all, roots):
-        """[(path, mtime, size, tags)] of the images with any (or all) of the folded tags."""
-        query, params = self._matching(folded, match_all, roots)
-        rows = self.db.execute(f"SELECT path, mtime, size, tags FROM images WHERE path IN ({query})", params)
-        return [(path, mtime, size, json.loads(tags)) for path, mtime, size, tags in rows]
+
+def search_files(index, roots, search):
+    """The index rows for a SearchDialog search: the SQL picks by tag and date, then name and type here."""
+    rows = index.find(roots, search["folded"], search["all"], search["start"], search["end"], search["by"])
+    name, extensions = search["name"].casefold(), search["extensions"]
+    return [row for row in rows
+            if (not extensions or row[0].lower().endswith(extensions))
+            and (not name or name in GLib.filename_display_basename(row[0]).casefold())]
 
 
 class Library:
-    """Keeps the tag index up to date for every image under the pinned folders, in the background."""
+    """Keeps the index up to date for every file under the pinned folders, in the background."""
 
     def __init__(self, index):
         self.index = index
         self.generation = 0
         self.running = False
         self.roots_scanned = None
-        self.checked = 0  # images looked at so far in this pass
+        self.checked = 0  # files looked at so far in this pass
         self.listeners = []  # called on the main loop as the index changes
 
     @staticmethod
@@ -1060,7 +1137,7 @@ class Library:
         return roots
 
     def refresh(self, folders, show_hidden):
-        """Look through every image under folders; read tags of new and changed ones."""
+        """Look through every file under folders; read tags of new and changed images."""
         roots = self.roots(folders)
         if self.running and roots == self.roots_scanned:
             return
@@ -1078,7 +1155,7 @@ class Library:
                     dirs[:] = [d for d in dirs
                                if not d.startswith(".Trash") and (show_hidden or not d.startswith("."))]
                     for name in files:
-                        if (not show_hidden and name.startswith(".")) or not is_image(name):
+                        if (not show_hidden and name.startswith(".")) or not is_media(name):
                             continue
                         path = os.path.join(folder, name)
                         try:
@@ -1088,7 +1165,7 @@ class Library:
                         checked += 1
                         missing.discard(path)
                         if known.get(path) != st.st_mtime_ns:
-                            batch.append((path, st.st_mtime_ns, st.st_size, read_file_tags(path)))
+                            batch.append((path, st.st_mtime_ns, st.st_size, *read_file_info(path)))
                         if time.monotonic() - last > 1:
                             GLib.idle_add(self._merge, generation, batch, checked, None)
                             batch, last = [], time.monotonic()
@@ -1702,55 +1779,124 @@ class PropertiesDialog(Adw.PreferencesDialog):
         run_in_thread(work, done)
 
 
-class FindByTagDialog(Adw.PreferencesDialog):
-    """Pick tags to list every image that has them, from all pinned folders."""
+class SearchDialog(Adw.PreferencesDialog):
+    """Search every file in the pinned folders by name, type, date taken or modified, and tags."""
 
     def __init__(self, window):
-        super().__init__(title="Find by Tag", search_enabled=True)
+        super().__init__(title="Search Pinned Folders")
         self.window = window
         app = window.get_application()
         self.index, self.library, self.settings = app.tag_index, app.library, window.settings
         self.roots = Library.roots(self.settings["folders"])
+        self.types = search_types()
         search = window.search or {}
         self.checked = dict(zip(search.get("folded", []), search.get("tags", [])))  # folded → tag
+        self.first, self.last = search.get("first"), search.get("last")  # the custom date range
         self.rows = []
-        self.fill_source = 0
+        self.fill_source = self.count_source = 0
 
         page = Adw.PreferencesPage()
         self.add(page)
-        status = Adw.PreferencesGroup()
-        page.add(status)
-        self.status_row = Adw.ActionRow()
-        self.spinner = Gtk.Spinner(spinning=True, valign=Gtk.Align.CENTER)
-        self.status_row.add_suffix(self.spinner)
-        status.add(self.status_row)
+        self.search_group = Adw.PreferencesGroup(title="Search in Pinned Folders")
+        page.add(self.search_group)
+        suffix = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        self.spinner = Gtk.Spinner(spinning=True)
+        suffix.append(self.spinner)
+        clear = Gtk.Button(label="Clear", tooltip_text="Clear the Search")
+        clear.connect("clicked", self._on_clear)
+        suffix.append(clear)
+        self.show_button = Gtk.Button(label="Show Files", css_classes=["suggested-action"])
+        self.show_button.connect("clicked", self._on_show)
+        suffix.append(self.show_button)
+        self.search_group.set_header_suffix(suffix)
 
-        options = Adw.PreferencesGroup()
-        page.add(options)
-        self.match_row = Adw.ComboRow(title="Show Images With",
-                                      model=Gtk.StringList.new(["Any Selected Tag", "All Selected Tags"]),
-                                      selected=1 if search.get("all") else 0)
-        self.match_row.connect("notify::selected", lambda *_: self._update_button())
-        options.add(self.match_row)
+        self.name_row = Adw.EntryRow(title="Name Contains", text=search.get("name", ""))
+        self.name_row.connect("changed", lambda *_: self._update_button(later=True))
+        self.name_row.connect("entry-activated", self._on_show)
+        self.search_group.add(self.name_row)
+        self.type_row = Adw.ComboRow(title="Type", model=Gtk.StringList.new([label for label, _ in self.types]),
+                                     enable_search=True, selected=search.get("type", 0),
+                                     expression=Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
+        self.type_row.connect("notify::selected", lambda *_: self._update_button())
+        self.search_group.add(self.type_row)
+        self.date_row = Adw.ComboRow(title="Date", model=Gtk.StringList.new(DATE_RANGES),
+                                     selected=search.get("date", 0))
+        self.date_row.connect("notify::selected", self._on_date_range)
+        self.search_group.add(self.date_row)
+        kinds = [kind for kind, _ in DATE_KINDS]
+        self.by_row = Adw.ComboRow(title="Which Date", model=Gtk.StringList.new([label for _, label in DATE_KINDS]),
+                                   selected=kinds.index(search.get("by", "taken")))
+        self.by_row.connect("notify::selected", self._on_date_range)
+        self.search_group.add(self.by_row)
+        self.setting_dates = False
+        self.first_row = self._date_row("From", "first")
+        self.last_row = self._date_row("To", "last")
 
         self.tags_group = Adw.PreferencesGroup(title="Tags")
         page.add(self.tags_group)
-        self.show_button = Gtk.Button(label="Show Images", valign=Gtk.Align.CENTER,
-                                      css_classes=["suggested-action"])
-        self.show_button.connect("clicked", self._on_show)
-        self.tags_group.set_header_suffix(self.show_button)
+        self.match_row = Adw.ComboRow(title="Show Files With",
+                                      model=Gtk.StringList.new(["Any Ticked Tag", "All Ticked Tags"]),
+                                      selected=1 if search.get("all") else 0)
+        self.match_row.connect("notify::selected", lambda *_: self._update_button())
+        self.tags_group.add(self.match_row)
 
         self.library.listeners.append(self._on_library_changed)
         self.connect("closed", self._on_closed)
+        self._show_dates()
         self._fill()
         if self.roots:
             self.library.refresh(self.settings["folders"], self.settings["show_hidden"])
         self._update_status()
 
+    def _date_row(self, title, attr):
+        row = Adw.ActionRow(title=title)
+        calendar = Gtk.Calendar()
+        button = Gtk.MenuButton(valign=Gtk.Align.CENTER, popover=Gtk.Popover(child=calendar))
+
+        def picked(calendar):
+            if self.setting_dates:
+                return
+            day = calendar.get_date()
+            setattr(self, attr, datetime.date(day.get_year(), day.get_month(), day.get_day_of_month()))
+            button.popdown()
+            self._show_dates()
+            self._update_button()
+
+        calendar.connect("day-selected", picked)
+        row.add_suffix(button)
+        row.set_activatable_widget(button)
+        row.button, row.calendar = button, calendar
+        self.search_group.add(row)
+        return row
+
+    def _on_date_range(self, *_):
+        if self.date_row.get_selected() == CUSTOM_RANGE and not (self.first or self.last):
+            self.last = datetime.date.today()
+            self.first = self.last - datetime.timedelta(days=29)
+        self._show_dates()
+        self._update_button()
+
+    def _show_dates(self):
+        custom = self.date_row.get_selected() == CUSTOM_RANGE
+        self.by_row.set_visible(self.date_row.get_selected() != 0)
+        self.by_row.set_subtitle("Photos that record when they were taken" if self._by() == "taken"
+                                 else "When each file was last changed")
+        self.setting_dates = True
+        for row, day in ((self.first_row, self.first), (self.last_row, self.last)):
+            row.set_visible(custom)
+            row.button.set_label(format_day(day) if day else "Any")
+            if day:
+                row.calendar.select_day(GLib.DateTime.new_local(day.year, day.month, day.day, 0, 0, 0))
+        self.setting_dates = False
+
+    def _by(self):
+        return DATE_KINDS[self.by_row.get_selected()][0]
+
     def _on_closed(self, *_):
         self.library.listeners.remove(self._on_library_changed)
-        if self.fill_source:
-            GLib.source_remove(self.fill_source)
+        for source in (self.fill_source, self.count_source):
+            if source:
+                GLib.source_remove(source)
 
     def _on_library_changed(self):
         self._update_status()
@@ -1766,29 +1912,30 @@ class FindByTagDialog(Adw.PreferencesDialog):
         running = self.library.running
         self.spinner.set_visible(running)
         if not self.roots:
-            self.status_row.set_title("No pinned folders")
-            self.status_row.set_subtitle("Pin folders in the sidebar to find their images by tag.")
-        elif running:
-            self.status_row.set_title("Indexing your pinned folders…")
-            self.status_row.set_subtitle(
-                f"{self.library.checked:,} images checked. Tags appear here as they're found; the first "
-                "time on a large collection can take a while, and you can keep using Glimpse.")
+            self.search_group.set_description("No pinned folders yet. Pin folders in the sidebar to search them.")
+            return
+        names = [GLib.filename_display_basename(root) for root in self.roots]
+        where = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+        if running:
+            self.search_group.set_description(
+                f"Indexing {where}… {self.library.checked:,} files checked so far. Results appear as they're "
+                "found; the first time on a large collection can take a while, and you can keep using Glimpse.")
         else:
-            total = self.index.count_images(self.roots)
-            self.status_row.set_title(f"{plural(total, 'image')} indexed")
-            self.status_row.set_subtitle("In your pinned folders and their subfolders.")
+            total = self.index.count_files(self.roots)
+            self.search_group.set_description(f"{plural(total, 'file')} in {where} and their subfolders.")
 
     def _fill(self):
         for row in self.rows:
             self.tags_group.remove(row)
         self.rows = []
         counts = self.index.tag_counts(self.roots)
+        self.match_row.set_visible(bool(counts))
         if not counts:
             self.tags_group.set_description(
                 "No tagged images found yet." + (" Still looking…" if self.library.running
                                                  else " Add tags in Properties (Alt+Enter)."))
         else:
-            self.tags_group.set_description(None)
+            self.tags_group.set_description("Tick tags to find the images that have them.")
         for tag, folded, count in counts:
             row = Adw.ActionRow(title=GLib.markup_escape_text(tag), subtitle=plural(count, "image"))
             check = Gtk.CheckButton(active=folded in self.checked, valign=Gtk.Align.CENTER)
@@ -1806,17 +1953,65 @@ class FindByTagDialog(Adw.PreferencesDialog):
             self.checked.pop(folded, None)
         self._update_button()
 
-    def _update_button(self):
-        if not self.checked:
-            self.show_button.set_label("Show Images")
+    def _on_clear(self, *_):
+        self.checked.clear()
+        self.first = self.last = None
+        self.name_row.set_text("")
+        self.type_row.set_selected(0)
+        self.date_row.set_selected(0)
+        self.by_row.set_selected(0)
+        self._fill()
+
+    def _search(self):
+        """The search the dialog's choices describe."""
+        choice = self.date_row.get_selected()
+        first, last = (self.first, self.last) if choice == CUSTOM_RANGE else (None, None)
+        if first and last and first > last:
+            first, last = last, first
+        start, end = date_bounds(choice, first, last)
+        if choice != CUSTOM_RANGE:
+            date_label = DATE_RANGES[choice]
+        elif first and last:
+            date_label = format_day(first) if first == last else f"{format_day(first)} – {format_day(last)}"
+        else:
+            date_label = f"From {format_day(first)}" if first else f"Until {format_day(last)}" if last else ""
+        if date_label:
+            date_label = ("Taken: " if self._by() == "taken" else "Modified: ") + date_label
+        type_label, extensions = self.types[self.type_row.get_selected()]
+        return {"tags": list(self.checked.values()), "folded": list(self.checked),
+                "all": self.match_row.get_selected() == 1, "name": self.name_row.get_text().strip(),
+                "type": self.type_row.get_selected(), "type_label": type_label if extensions else "",
+                "extensions": extensions, "date": choice, "first": self.first, "last": self.last,
+                "start": start, "end": end, "by": self._by(),
+                "date_label": date_label if start is not None or end is not None else ""}
+
+    @staticmethod
+    def _is_empty(search):
+        return not (search["folded"] or search["name"] or search["extensions"]
+                    or search["start"] is not None or search["end"] is not None)
+
+    def _update_button(self, later=False):
+        if self.count_source:
+            GLib.source_remove(self.count_source)
+            self.count_source = 0
+        if later:  # wait for a pause in typing before counting
+            self.count_source = GLib.timeout_add(250, self._update_button)
+            return False
+        search = self._search()
+        if self._is_empty(search) or not self.roots:
+            self.show_button.set_label("Show Files")
             self.show_button.set_sensitive(False)
-            return
-        count = self.index.count(list(self.checked), self.match_row.get_selected() == 1, self.roots)
-        self.show_button.set_label(f"Show {plural(count, 'Image')}")
+            return False
+        count = len(search_files(self.index, self.roots, search))
+        self.show_button.set_label(f"Show {plural(count, 'File')}")
         self.show_button.set_sensitive(count > 0)
+        return False
 
     def _on_show(self, *_):
-        self.window.show_tag_search(list(self.checked.values()), self.match_row.get_selected() == 1)
+        search = self._search()
+        if self._is_empty(search) or not self.roots or not search_files(self.index, self.roots, search):
+            return
+        self.window.show_search(search)
         self.close()
 
 
@@ -1832,7 +2027,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.thumbs = app.thumbs
         self.tag_index = app.tag_index
         self.library = app.library
-        self.search = None  # {"tags", "folded", "all"} while showing a Find by Tag result
+        self.search = None  # what SearchDialog asked for, while showing its results
         self.search_source = 0
 
         self.folder = None
@@ -1899,8 +2094,8 @@ class ImageWindow(Adw.ApplicationWindow):
 
         folder_header = Gtk.Box(margin_start=12, margin_end=6, margin_top=6)
         folder_header.append(Gtk.Label(label="Folders", xalign=0, hexpand=True, css_classes=["heading"]))
-        folder_header.append(Gtk.Button(icon_name="system-search-symbolic", action_name="win.find-tags",
-                                        tooltip_text="Find by Tag… (Ctrl+F)", css_classes=["flat"]))
+        folder_header.append(Gtk.Button(icon_name="system-search-symbolic", action_name="win.search",
+                                        tooltip_text="Search Pinned Folders… (Ctrl+F)", css_classes=["flat"]))
         folder_header.append(Gtk.Button(icon_name="list-add-symbolic", action_name="win.add-folder",
                                         tooltip_text="Pin Folders to Sidebar…", css_classes=["flat"]))
         folders_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=90)
@@ -1918,9 +2113,9 @@ class ImageWindow(Adw.ApplicationWindow):
         self.view_button = Gtk.MenuButton(label="All", menu_model=self.tag_menu, css_classes=["flat"],
                                           always_show_arrow=True, tooltip_text="Show and Sort Images")
         images_header.append(self.view_button)
-        self.search_close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="End Tag Search",
+        self.search_close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="End Search",
                                        css_classes=["flat"], visible=False)
-        self.search_close.connect("clicked", lambda *_: self.end_tag_search())
+        self.search_close.connect("clicked", lambda *_: self.end_search())
         images_header.append(self.search_close)
         images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=120)
         images_box.append(images_header)
@@ -2020,7 +2215,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section.append("Open Folder…", "win.open-folder")
         menu.append_section(None, section)
         section = Gio.Menu()
-        section.append("Find by Tag…", "win.find-tags")
+        section.append("Search Pinned Folders…", "win.search")
         section.append("Pin Folders to Sidebar…", "win.add-folder")
         section.append("Pin Current Folder to Sidebar", "win.pin-current")
         menu.append_section(None, section)
@@ -2406,7 +2601,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "open-with": self.on_open_with,
             "show-containing": lambda *_: show_containing_folder(self, self.current_path),
             "properties": self.on_properties,
-            "find-tags": lambda *_: FindByTagDialog(self).present(self),
+            "search": lambda *_: SearchDialog(self).present(self),
             "copy-to": lambda *_: self.on_transfer(move=False),
             "move-to": lambda *_: self.on_transfer(move=True),
             "rename": self.on_rename,
@@ -2689,13 +2884,10 @@ class ImageWindow(Adw.ApplicationWindow):
             self.updating = False
         self.path_index = {item.path: i for i, item in enumerate(items)}
 
-        noun = "image" if self.search else "file"  # tag searches only find images
-        count = f"{len(items)} of {plural(total, noun)}" if self.tag_filter else plural(total, noun)
+        count = f"{len(items)} of {plural(total, 'file')}" if self.tag_filter else plural(total, "file")
         if self.search:
-            joiner = " + " if self.search["all"] else " or "
-            self.sidebar_title.set_title(joiner.join(self.search["tags"]))
-            folders = len({os.path.dirname(item.path) for item in items})
-            count += f" in {plural(folders, 'folder')}" + (" · indexing…" if self.library.running else "")
+            self.sidebar_title.set_title(self._search_title())
+            count += " in Pinned Folders" + (" · indexing…" if self.library.running else "")
         else:
             self.sidebar_title.set_title(GLib.filename_display_basename(self.folder))
         self.sidebar_title.set_subtitle(count + (" · reading tags…" if self.tags_loading else ""))
@@ -2743,14 +2935,14 @@ class ImageWindow(Adw.ApplicationWindow):
         if self.search:
             self.rescan()  # no folder monitor while showing search results
 
-    # -------------------------------------------------------- tag search ---
+    # ------------------------------------------------------------ search ---
 
-    def show_tag_search(self, tags, match_all):
-        """List every image in the pinned folders with any (or all) of tags."""
+    def show_search(self, search):
+        """List every file in the pinned folders that matches a SearchDialog search."""
         if self.monitor:
             self.monitor.cancel()
             self.monitor = None
-        self.search = {"tags": tags, "folded": [t.casefold() for t in tags], "all": match_all}
+        self.search = search
         self.folder = None
         self.current_path = None
         self.path_index = {}
@@ -2765,7 +2957,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.current_path = None
         self.path_index = {}
 
-    def end_tag_search(self):
+    def end_search(self):
         self._leave_search()
         last = self.settings["last_folder"]
         if last and os.path.isdir(last):
@@ -2785,8 +2977,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.update_actions()
 
     def _search_items(self):
-        rows = self.tag_index.search(self.search["folded"], self.search["all"],
-                                     Library.roots(self.settings["folders"]))
+        rows = search_files(self.tag_index, Library.roots(self.settings["folders"]), self.search)
         items = []
         for path, mtime, size, tags in rows:
             item = ImageItem(path, mtime, size)
@@ -2797,6 +2988,15 @@ class ImageWindow(Adw.ApplicationWindow):
         else:
             items.sort(key=lambda i: (GLib.utf8_collate_key_for_filename(i.display_name, -1), i.path))
         return items
+
+    def _search_title(self):
+        search, parts = self.search, []
+        if search["name"]:
+            parts.append(f"“{search['name']}”")
+        if search["tags"]:
+            parts.append((" + " if search["all"] else " or ").join(search["tags"]))
+        parts += [label for label in (search["type_label"], search["date_label"]) if label]
+        return " · ".join(parts) or "Search Results"
 
     def _on_library_changed(self):
         if self.search and not self.search_source:  # show new matches as indexing finds them
@@ -3488,7 +3688,7 @@ class Application(Adw.Application):
             "win.move-to": ["<Control><Shift>m"],
             "win.rename": ["F2"],
             "win.properties": ["<Alt>Return", "<Alt>KP_Enter"],
-            "win.find-tags": ["<Control>f"],
+            "win.search": ["<Control>f"],
             "win.toggle-sidebar": ["F9"],
             "win.fullscreen": ["F11"],
         }
