@@ -8,8 +8,9 @@ mkdir -p "$bin" "$apps"
 install -m 755 "$here/image2.py" "$bin/glimpse"
 sed "s|@EXEC@|$bin/glimpse|" "$here/io.github.pst007xx.Glimpse.desktop" > "$apps/io.github.pst007xx.Glimpse.desktop"
 icons="$HOME/.local/share/icons/hicolor"
-install -Dm 644 "$here/icons/io.github.pst007xx.Glimpse.svg" "$icons/scalable/apps/io.github.pst007xx.Glimpse.svg"
-install -Dm 644 "$here/icons/io.github.pst007xx.Glimpse-256.png" "$icons/256x256/apps/io.github.pst007xx.Glimpse.png"
+for size in 48 64 128 256; do
+    install -Dm 644 "$here/icons/io.github.pst007xx.Glimpse-$size.png" "$icons/${size}x${size}/apps/io.github.pst007xx.Glimpse.png"
+done
 gtk-update-icon-cache -q -t "$icons" 2>/dev/null || true
 update-desktop-database "$apps" 2>/dev/null || true
 echo "Installed. Launch “Glimpse Image Viewer” from Activities, or run: glimpse [file-or-folder]"

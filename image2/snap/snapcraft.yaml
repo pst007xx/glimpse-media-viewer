@@ -45,7 +45,7 @@ contact: https://github.com/pst007xx/Image2-Viewer
 website: https://github.com/pst007xx/Image2-Viewer
 source-code: https://github.com/pst007xx/Image2-Viewer
 issues: https://github.com/pst007xx/Image2-Viewer/issues
-icon: icons/io.github.pst007xx.Glimpse.svg
+icon: icons/io.github.pst007xx.Glimpse-256.png
 
 apps:
   glimpse-media-viewer:
@@ -86,13 +86,13 @@ parts:
     override-build: |
       craftctl default
       install -Dm755 image2.py "$CRAFT_PART_INSTALL/bin/glimpse"
-      install -Dm644 icons/io.github.pst007xx.Glimpse.svg \
-        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/scalable/apps/io.github.pst007xx.Glimpse.svg"
-      install -Dm644 icons/io.github.pst007xx.Glimpse-256.png \
-        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/256x256/apps/io.github.pst007xx.Glimpse.png"
+      for size in 48 64 128 256; do
+        install -Dm644 icons/io.github.pst007xx.Glimpse-$size.png \
+          "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/${size}x${size}/apps/io.github.pst007xx.Glimpse.png"
+      done
       mkdir -p "$CRAFT_PART_INSTALL/usr/share/applications"
       sed -e 's|@EXEC@|glimpse-media-viewer|' \
-          -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/io.github.pst007xx.Glimpse.svg|' \
+          -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/256x256/apps/io.github.pst007xx.Glimpse.png|' \
           io.github.pst007xx.Glimpse.desktop \
           > "$CRAFT_PART_INSTALL/usr/share/applications/io.github.pst007xx.Glimpse.desktop"
 
