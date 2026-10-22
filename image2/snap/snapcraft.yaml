@@ -1,21 +1,27 @@
-name: image2-viewer
+name: glimpse-media-viewer
 base: core24
 version: '1.0'
-title: Image2-Viewer
-summary: View, tag and organise your photos and videos
+title: Glimpse Image Viewer
+summary: View and organise your images, videos and music
 description: |
-  Image2-Viewer is a fast, simple image viewer and organiser that fits right into GNOME.
-  Open a photo and every image and video in its folder is ready to browse in the sidebar.
+  Glimpse Image Viewer is a fast, simple media viewer and organiser that fits right into GNOME.
+  Open a file and every image, video and song in its folder is ready to browse in the sidebar.
 
   **View**
-  * Thumbnails of every image and video in the folder
+  * Thumbnails of every image and video, and cover art for songs
   * Zoom with buttons, keyboard, Ctrl+scroll or pinch, and drag to pan
-  * Play videos in the main window: MP4, MOV, MKV, WebM, AVI and more,
+  * JPEG, PNG, WebP, HEIC, AVIF, TIFF, SVG, GIF and other images
+  * Fullscreen viewing
+
+  **Play**
+  * Videos play in the main window: MP4, MOV, MKV, WebM, AVI, WMV and more,
     with H.264, HEVC, VP9 and other common codecs
-  * Fullscreen viewing, and JPEG, PNG, WebP, HEIC, AVIF, TIFF, SVG, GIF and other images
+  * Music plays with its title, artist, album and cover art: MP3, FLAC, Ogg, Opus,
+    AAC, Apple Lossless, WAV, AIFF, WMA and WavPack
+  * A folder of songs plays straight through, like an album
 
   **Organise**
-  * Pin your photo folders to the sidebar and drag images onto them to move or copy,
+  * Pin your folders to the sidebar and drag files onto them to move or copy,
     with undo and Alt+1…9 quick-move keys
   * Copy, move, rename and delete several files at once, to the trash or permanently
   * Set any image as your wallpaper
@@ -30,8 +36,8 @@ description: |
   * Properties shows file and camera details: camera, lens, exposure and date taken
   * Open files in another app, or show them in Files
 
-  To use photos on external drives, connect the removable-media interface:
-  snap connect image2-viewer:removable-media
+  To use files on external drives, connect the removable-media interface:
+  snap connect glimpse-media-viewer:removable-media
 grade: stable
 confinement: strict
 license: GPL-3.0-or-later
@@ -39,22 +45,22 @@ contact: https://github.com/pst007xx/Image2-Viewer
 website: https://github.com/pst007xx/Image2-Viewer
 source-code: https://github.com/pst007xx/Image2-Viewer
 issues: https://github.com/pst007xx/Image2-Viewer/issues
-icon: icons/io.github.imagery.Image2.svg
+icon: icons/io.github.pst007xx.Glimpse.svg
 
 apps:
-  image2-viewer:
+  glimpse-media-viewer:
     # runs on core24's own /usr/bin/python3 (snapcraft drops the staged copy as the base has it)
-    command: bin/image2
-    common-id: io.github.imagery.Image2
-    desktop: usr/share/applications/io.github.imagery.Image2.desktop
+    command: bin/glimpse
+    common-id: io.github.pst007xx.Glimpse
+    desktop: usr/share/applications/io.github.pst007xx.Glimpse.desktop
     # gnome supplies GTK 4, libadwaita and the desktop, wayland, x11, gsettings… plugs
     extensions: [gnome]
     slots:
-      - dbus-image2     # lets GApplication own its app ID on the session bus
+      - dbus-glimpse    # lets GApplication own its app ID on the session bus
     plugs:
       - home             # browse and organise images in your home folder
-      - removable-media   # /media and /mnt (connect manually: snap connect image2-viewer:removable-media)
-      - audio-playback    # sound for videos
+      - removable-media   # /media and /mnt (connect manually: snap connect glimpse-media-viewer:removable-media)
+      - audio-playback    # sound for videos and music
     environment:
       PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
       # GTK's own file dialog and drag-and-drop see real paths (with the home plug),
@@ -64,13 +70,13 @@ apps:
       GTK_PATH: $SNAP/usr/lib/x86_64-linux-gnu/gtk-4.0
 
 slots:
-  dbus-image2:
+  dbus-glimpse:
     interface: dbus
     bus: session
-    name: io.github.imagery.Image2
+    name: io.github.pst007xx.Glimpse
 
 parts:
-  image2:
+  glimpse:
     plugin: nil
     source: .
     stage-packages:
@@ -79,16 +85,16 @@ parts:
       - gir1.2-gexiv2-0.10   # Properties: camera details and tags (brings libgexiv2 and libexiv2)
     override-build: |
       craftctl default
-      install -Dm755 image2.py "$CRAFT_PART_INSTALL/bin/image2"
-      install -Dm644 icons/io.github.imagery.Image2.svg \
-        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/scalable/apps/io.github.imagery.Image2.svg"
-      install -Dm644 icons/io.github.imagery.Image2-256.png \
-        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/256x256/apps/io.github.imagery.Image2.png"
+      install -Dm755 image2.py "$CRAFT_PART_INSTALL/bin/glimpse"
+      install -Dm644 icons/io.github.pst007xx.Glimpse.svg \
+        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/scalable/apps/io.github.pst007xx.Glimpse.svg"
+      install -Dm644 icons/io.github.pst007xx.Glimpse-256.png \
+        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/256x256/apps/io.github.pst007xx.Glimpse.png"
       mkdir -p "$CRAFT_PART_INSTALL/usr/share/applications"
-      sed -e 's|@EXEC@|image2-viewer|' \
-          -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/io.github.imagery.Image2.svg|' \
-          io.github.imagery.Image2.desktop \
-          > "$CRAFT_PART_INSTALL/usr/share/applications/io.github.imagery.Image2.desktop"
+      sed -e 's|@EXEC@|glimpse-media-viewer|' \
+          -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/io.github.pst007xx.Glimpse.svg|' \
+          io.github.pst007xx.Glimpse.desktop \
+          > "$CRAFT_PART_INSTALL/usr/share/applications/io.github.pst007xx.Glimpse.desktop"
 
   # The GNOME platform has GStreamer but not GTK's GStreamer video module or the libav
   # decoders (H.264, HEVC…, what most cameras and phones record). Keep just those and the
@@ -99,9 +105,11 @@ parts:
     stage-packages:
       - libgtk-4-media-gstreamer
       - gstreamer1.0-libav
+      - gstreamer1.0-plugins-ugly   # only for its ASF reader: WMV video and WMA music
     prime:
       - usr/lib/*/gtk-4.0/4.0.0/media
       - usr/lib/*/gstreamer-1.0/libgstlibav.so
+      - usr/lib/*/gstreamer-1.0/libgstasf.so
       - usr/lib/*/libavfilter.so.9*
       - usr/lib/*/libpostproc.so.57*
       - usr/lib/*/libass.so.9*

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Salvatore Turone
-"""Image2-Viewer — a simple image viewer for GNOME, built with GTK 4 and libadwaita."""
+"""Glimpse Image Viewer — view and organise images, videos and music, built with GTK 4 and libadwaita."""
 
 import filecmp
 import json
@@ -35,17 +35,18 @@ else:
 
 try:
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
+    gi.require_version("GstPbutils", "1.0")
+    from gi.repository import Gst, GstPbutils
 except (ValueError, ImportError):
-    Gst = None  # videos still play (GTK brings its own GStreamer) but get no thumbnails
+    Gst = None  # videos and music still play (GTK brings its own GStreamer) but get no thumbnails or tags
 else:
     Gst.init(None)
 
 # exiv2's XMP support isn't safe to use from several threads at once
 METADATA_LOCK = threading.Lock()
 
-APP_ID = "io.github.imagery.Image2"
-APP_NAME = "Image2-Viewer"
+APP_ID = "io.github.pst007xx.Glimpse"
+APP_NAME = "Glimpse Image Viewer"
 VERSION = "1.0"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
@@ -80,7 +81,7 @@ def wallpaper_menu():
 # (group, [(description, accelerators)]) for the Keyboard Shortcuts window
 SHORTCUTS = [
     ("General", [
-        ("Open image", "<Control>o"),
+        ("Open file", "<Control>o"),
         ("Open folder", "<Control><Shift>o"),
         ("Preferences", "<Control>comma"),
         ("Keyboard shortcuts", "<Control>question"),
@@ -89,10 +90,10 @@ SHORTCUTS = [
         ("Quit", "<Control>q"),
     ]),
     ("Navigation", [
-        ("Next image", "Right Page_Down space"),
-        ("Play or pause a video", "space"),
-        ("Previous image", "Left Page_Up BackSpace"),
-        ("First / last image", "Home End"),
+        ("Next file", "Right Page_Down space"),
+        ("Play or pause a video or song", "space"),
+        ("Previous file", "Left Page_Up BackSpace"),
+        ("First / last file", "Home End"),
         ("Toggle sidebar", "F9"),
         ("Fullscreen", "F11"),
         ("Leave fullscreen", "Escape"),
@@ -104,7 +105,7 @@ SHORTCUTS = [
         ("Original size", "1 <Control>1"),
     ]),
     ("Files", [
-        ("Select all images", "<Control>a"),
+        ("Select all files", "<Control>a"),
         ("Copy to folder", "<Control><Shift>c"),
         ("Move to folder", "<Control><Shift>m"),
         ("Move to pinned folder 1–9", "<Alt>1...<Alt>9"),
@@ -119,13 +120,14 @@ SHORTCUTS = [
 # (page title, icon, [(group title, [(row title, row text)])]) for the Help dialog
 HELP = [
     ("Viewing", "image-x-generic-symbolic", [
-        ("Opening Images", [
-            ("Open an image or folder",
-             "Use the open button (Ctrl+O), Open Folder… in the main menu (Ctrl+Shift+O), drag an image "
-             "or folder onto the window, or choose Image2-Viewer under Open With… in Files."),
+        ("Opening Files", [
+            ("Open a file or folder",
+             "Use the open button (Ctrl+O), Open Folder… in the main menu (Ctrl+Shift+O), drag a file "
+             "or folder onto the window, or choose Glimpse Image Viewer under Open With… in Files."),
             ("Browse the folder",
-             "Every image in the opened image's folder is listed in the sidebar. Use the arrow buttons, "
-             "Left/Right, Page Up/Down or Space/Backspace to step through them, Home/End for first/last."),
+             "Every image, video and music file in the opened file's folder is listed in the sidebar. Use the "
+             "arrow buttons, Left/Right, Page Up/Down or Space/Backspace to step through them, Home/End for "
+             "first/last."),
             ("Image details",
              "The title bar shows the file name, its position in the folder, its size in pixels and on disk."),
         ]),
@@ -134,6 +136,18 @@ HELP = [
              "Videos are listed with the images and start playing when you select them. Use the controls "
              "at the bottom of the video to pause, seek and change the volume, or press Space to play and pause."),
             ("Fullscreen video", "Double-click a video to watch it fullscreen."),
+        ]),
+        ("Music", [
+            ("Play music",
+             "Music files are listed with the images and videos, and start playing when you select them. "
+             "The player shows the song's title, artist, album and cover art, with controls to pause, seek "
+             "and change the volume. Space plays and pauses."),
+            ("Play a whole album",
+             "When a song ends, the next music file in the list plays, so a folder of songs plays straight "
+             "through. Step to another file at any time to stop."),
+            ("Cover art",
+             "Glimpse shows the picture saved in the song, or else a cover.jpg, folder.jpg or front.jpg "
+             "in the same folder. The cover also appears as the song's thumbnail."),
         ]),
         ("Zooming", [
             ("Zoom in and out",
@@ -152,7 +166,7 @@ HELP = [
         ("Pinned Folders", [
             ("Pin folders",
              "Click + above Folders, choose Pin Current Folder to Sidebar in the main menu, or drag folders "
-             "from Files onto the Folders list. Your Pictures folder is pinned the first time Image2-Viewer starts."),
+             "from Files onto the Folders list. Your Pictures folder is pinned the first time Glimpse starts."),
             ("Browse subfolders", "Expand a folder with its arrow; click any folder to show its images."),
             ("Folder menu",
              "Right-click a folder to open it, show it in Files, move or copy the selected images into it, "
@@ -180,7 +194,7 @@ HELP = [
         ("Other Apps", [
             ("Open With…",
              "Pick any installed app, such as an editor, for the current image. When that app saves, "
-             "Image2-Viewer reloads the image automatically."),
+             "Glimpse reloads the image automatically."),
             ("Open Containing Folder", "Shows the current image in your file manager."),
         ]),
         ("Properties & Tags", [
@@ -210,15 +224,13 @@ HELP = [
              "Choose Set as Wallpaper in the main menu or the right-click menu, then how it should fit: "
              "Original Size shows the image at its actual size, centred; Zoom to Fill enlarges it to cover "
              "the screen, cropping the edges if needed; Stretch to Fill makes it exactly fill the screen, "
-             "distorting it if the shape differs. Image2-Viewer copies the image to "
+             "distorting it if the shape differs. Glimpse copies the image to "
              "~/.local/share/backgrounds and uses it for both the light and dark desktop style, so the "
              "wallpaper keeps working if you later move or delete the original."),
         ]),
         ("Preferences", [
             ("Image list", "Turn thumbnails on or off, show hidden files, and sort by name, date modified or tag."),
-            ("Supported formats",
-             "Image2-Viewer opens every format your system's image loaders support, such as JPEG, PNG, WebP, AVIF, "
-             "HEIC, TIFF, GIF, SVG and BMP."),
+            ("Supported formats", "See File Types for every image, video and music format Glimpse opens."),
         ]),
     ]),
 ]
@@ -273,7 +285,7 @@ FORMAT_NAMES = {
 
 
 def file_types_page():
-    """Help page listing the formats this copy can open: images depend on the installed pixbuf loaders."""
+    """Help page listing the formats Glimpse can open: images depend on the installed pixbuf loaders."""
     page = Adw.PreferencesPage(title="File Types", icon_name="text-x-generic-symbolic")
 
     def group(title, description, rows):
@@ -289,6 +301,7 @@ def file_types_page():
           sorted(formats, key=lambda f: f[0].casefold()))
     group("Videos", "Video: H.264, HEVC (H.265), VP8, VP9, MPEG-4, MPEG-2 and Windows Media. "
           "Sound: AAC, MP3, Opus, Vorbis, FLAC and AC-3. AV1 video isn't supported.", VIDEO_FORMATS)
+    group("Music", "Titles, artists, albums and cover art are read from the song's tags.", AUDIO_FORMATS)
     return page
 
 
@@ -329,6 +342,19 @@ VIDEO_FORMATS = [
     ("AVCHD", ["mts", "m2ts"]),
 ]
 VIDEO_EXTENSIONS = tuple("." + ext for _, extensions in VIDEO_FORMATS for ext in extensions)
+AUDIO_FORMATS = [
+    ("MP3", ["mp3"]),
+    ("FLAC", ["flac"]),
+    ("Ogg Vorbis", ["ogg", "oga"]),
+    ("Opus", ["opus"]),
+    ("AAC and Apple Lossless", ["m4a", "aac"]),
+    ("WAV", ["wav"]),
+    ("AIFF", ["aiff", "aif"]),
+    ("Windows Media Audio", ["wma"]),
+    ("WavPack", ["wv"]),
+    ("Matroska Audio", ["mka"]),
+]
+AUDIO_EXTENSIONS = tuple("." + ext for _, extensions in AUDIO_FORMATS for ext in extensions)
 
 
 def is_image(name):
@@ -339,8 +365,12 @@ def is_video(name):
     return name.lower().endswith(VIDEO_EXTENSIONS)
 
 
+def is_audio(name):
+    return name.lower().endswith(AUDIO_EXTENSIONS)
+
+
 def is_media(name):
-    return is_image(name) or is_video(name)
+    return is_image(name) or is_video(name) or is_audio(name)
 
 
 def format_duration(microseconds):
@@ -384,6 +414,9 @@ def load_thumbnail(path, size):
         pass
     if is_video(path):
         return video_frame(path, size)
+    if is_audio(path):
+        cover = song_info(path).get("cover")
+        return cover and scale_to_fit(cover, size)
     pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
     return pixbuf.apply_embedded_orientation() or pixbuf
 
@@ -419,12 +452,66 @@ def video_frame(path, size):
         pixbuf = sink.get_by_name("frame").get_property("last-pixbuf")
     finally:
         playbin.set_state(Gst.State.NULL)
-    if pixbuf is None:
-        return None
+    return pixbuf and scale_to_fit(pixbuf, size)
+
+
+def scale_to_fit(pixbuf, size):
     width, height = pixbuf.get_width(), pixbuf.get_height()
     scale = min(size / width, size / height)
     return pixbuf.scale_simple(max(1, round(width * scale)), max(1, round(height * scale)),
                                GdkPixbuf.InterpType.BILINEAR)
+
+
+COVER_NAMES = ("cover", "folder", "front", "album")
+COVER_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def song_info(path):
+    """{"title", "artist", "album", "cover": pixbuf}, as far as a music file's tags have them."""
+    info = {}
+    if Gst is not None:
+        try:
+            found = GstPbutils.Discoverer.new(5 * Gst.SECOND).discover_uri(GLib.filename_to_uri(path))
+        except GLib.Error:
+            found = None
+        for stream in found.get_stream_list() if found else []:
+            tags = stream.get_tags()
+            if tags is None:
+                continue
+            for key in ("title", "artist", "album"):
+                ok, value = tags.get_string(key)
+                if ok and value and key not in info:
+                    info[key] = value
+            for key in ("image", "preview-image"):
+                ok, sample = tags.get_sample(key)
+                if ok and "cover" not in info:
+                    buffer = sample.get_buffer()
+                    try:
+                        loader = GdkPixbuf.PixbufLoader()
+                        loader.write(buffer.extract_dup(0, buffer.get_size()))
+                        loader.close()
+                        info["cover"] = loader.get_pixbuf()
+                    except GLib.Error:
+                        pass
+    if "cover" not in info:
+        info["cover"] = folder_cover(os.path.dirname(path))
+    return info
+
+
+def folder_cover(folder):
+    """An album's cover.jpg, folder.jpg… beside its songs, or None."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+    for name in sorted(names):
+        stem, ext = os.path.splitext(name.lower())
+        if stem in COVER_NAMES and ext in COVER_EXTENSIONS:
+            try:
+                return load_pixbuf(os.path.join(folder, name))
+            except GLib.Error:
+                pass
+    return None
 
 
 _portal_requests = 0
@@ -450,7 +537,7 @@ def portal_open(window, path, directory=False, on_error=None):
         return
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     _portal_requests += 1
-    token = f"image2_{_portal_requests}"
+    token = f"glimpse_{_portal_requests}"
     options = {"handle_token": GLib.Variant("s", token)}
     if not directory:
         options["ask"] = GLib.Variant("b", True)
@@ -528,7 +615,7 @@ TAG_KEYS = ("Xmp.dc.subject", "Iptc.Application2.Keywords")
 
 def open_metadata(path):
     """GExiv2 metadata for path, or None if GExiv2 is missing or can't read the file."""
-    if GExiv2 is None or is_video(path):  # tags go in images only
+    if GExiv2 is None or is_video(path) or is_audio(path):  # tags go in images only
         return None
     metadata = GExiv2.Metadata()
     try:
@@ -665,7 +752,7 @@ class Settings(GObject.Object):
 
     def __init__(self):
         super().__init__()
-        self.path = os.path.join(GLib.get_user_config_dir(), "image2", "settings.json")
+        self.path = os.path.join(GLib.get_user_config_dir(), "glimpse", "settings.json")
         self.values = dict(self.DEFAULTS)
         # On first run, pin the Pictures folder so the Folders section isn't empty.
         pictures = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES)
@@ -784,7 +871,7 @@ class TagIndex:
     def __init__(self):
         self.generation = 0
         # In the Snap, the common dir: it's kept as is across updates, not copied per revision
-        folder = os.path.join(os.environ.get("SNAP_USER_COMMON") or GLib.get_user_cache_dir(), "image2")
+        folder = os.path.join(os.environ.get("SNAP_USER_COMMON") or GLib.get_user_cache_dir(), "glimpse")
         try:
             os.makedirs(folder, exist_ok=True)
             self.db = self._open(os.path.join(folder, "tags.db"))
@@ -1473,7 +1560,7 @@ class FindByTagDialog(Adw.PreferencesDialog):
             self.status_row.set_title("Indexing your pinned folders…")
             self.status_row.set_subtitle(
                 f"{self.library.checked:,} images checked. Tags appear here as they're found; the first "
-                "time on a large collection can take a while, and you can keep using Image2-Viewer.")
+                "time on a large collection can take a while, and you can keep using Glimpse.")
         else:
             total = self.index.count_images(self.roots)
             self.status_row.set_title(f"{plural(total, 'image')} indexed")
@@ -1614,7 +1701,7 @@ class ImageWindow(Adw.ApplicationWindow):
         folders_box.add_controller(pin_drop)
 
         images_header = Gtk.Box(margin_start=12, margin_end=6, margin_top=6)
-        images_header.append(Gtk.Label(label="Images", xalign=0, hexpand=True, css_classes=["heading"]))
+        images_header.append(Gtk.Label(label="Files", xalign=0, hexpand=True, css_classes=["heading"]))
         self.tag_menu = Gio.Menu()
         self.view_button = Gtk.MenuButton(label="All", menu_model=self.tag_menu, css_classes=["flat"],
                                           always_show_arrow=True, tooltip_text="Show and Sort Images")
@@ -1655,15 +1742,29 @@ class ImageWindow(Adw.ApplicationWindow):
         self.view = ImageView()
         self.view.connect("scale-changed", lambda *_: self._update_zoom_label())
         self.scroller = Gtk.ScrolledWindow(child=self.view)
+        self.stream = None  # the playing video or song
         self.video = Gtk.Video(hexpand=True, vexpand=True)
 
-        welcome = Adw.StatusPage(icon_name="image-x-generic-symbolic", title="Open an Image",
-                                 description="Or drag an image or folder onto this window")
-        welcome_button = Gtk.Button(label="_Open Image…", use_underline=True, action_name="win.open",
+        # Music: cover art (or a note), the song's tags, and the playback controls
+        self.cover = Gtk.Image(pixel_size=256, margin_bottom=12, css_classes=["icon-dropshadow"])
+        self.song_title = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, css_classes=["title-2"])
+        self.song_artist = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, css_classes=["title-4"])
+        self.song_album = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, css_classes=["dim-label"])
+        self.music_controls = Gtk.MediaControls(margin_top=12)
+        song = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.CENTER,
+                       margin_start=24, margin_end=24, margin_top=24, margin_bottom=24)
+        for widget in (self.cover, self.song_title, self.song_artist, self.song_album, self.music_controls):
+            song.append(widget)
+        self.music = Gtk.ScrolledWindow(child=Adw.Clamp(maximum_size=480, child=song),
+                                        hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+        welcome = Adw.StatusPage(icon_name="image-x-generic-symbolic", title="Open a File",
+                                 description="Images, videos and music. Or drag a file or folder onto this window")
+        welcome_button = Gtk.Button(label="_Open File…", use_underline=True, action_name="win.open",
                                     halign=Gtk.Align.CENTER, css_classes=["pill", "suggested-action"])
         welcome.set_child(welcome_button)
-        self.empty_page = Adw.StatusPage(icon_name="folder-symbolic", title="No Images",
-                                         description="This folder contains no images or videos")
+        self.empty_page = Adw.StatusPage(icon_name="folder-symbolic", title="Nothing to Show",
+                                         description="This folder has no images, videos or music")
         self.error_page = Adw.StatusPage(icon_name="image-missing-symbolic", title="Could Not Load Image")
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
@@ -1672,6 +1773,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.stack.add_named(self.error_page, "error")
         self.stack.add_named(self.scroller, "image")
         self.stack.add_named(self.video, "video")
+        self.stack.add_named(self.music, "music")
         self.stack.add_named(Adw.Spinner() if hasattr(Adw, "Spinner") else Gtk.Spinner(spinning=True,
                              halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, width_request=32,
                              height_request=32), "loading")
@@ -1711,7 +1813,7 @@ class ImageWindow(Adw.ApplicationWindow):
         section = Gio.Menu()
         section.append("Keyboard Shortcuts", "app.shortcuts")
         section.append("Help", "app.help")
-        section.append("About Image2-Viewer", "app.about")
+        section.append(f"About {APP_NAME}", "app.about")
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
                                        tooltip_text="Main Menu"))
@@ -1826,6 +1928,7 @@ class ImageWindow(Adw.ApplicationWindow):
             box.thumb.set_from_paintable(texture)
         else:
             box.thumb.set_from_icon_name("video-x-generic-symbolic" if is_video(item.path)
+                                         else "audio-x-generic-symbolic" if is_audio(item.path)
                                          else "image-x-generic-symbolic")
 
     def _row_unbind(self, factory, list_item):
@@ -1906,7 +2009,7 @@ class ImageWindow(Adw.ApplicationWindow):
         paths = [f.get_path() for f in value.get_files() if f.get_path()]
         images = [p for p in paths if os.path.isfile(p) and is_media(os.path.basename(p))]
         if not images:
-            self.toast("Only images and videos can be dropped onto a folder")
+            self.toast("Only images, videos and music can be dropped onto a folder")
             return False
         self._transfer(images, node.path, self._drop_action(target) == Gdk.DragAction.MOVE)
         return True
@@ -2121,9 +2224,10 @@ class ImageWindow(Adw.ApplicationWindow):
         click = Gtk.GestureClick()
         click.connect("pressed", lambda g, n, x, y: n == 2 and self.actions["fullscreen"].activate(None))
         self.video.add_controller(click)
-        context = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
-        context.connect("pressed", lambda g, n, x, y: self.current_path and self._popup(self.image_menu, x, y))
-        self.video.add_controller(context)
+        for widget in (self.video, self.music):
+            context = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+            context.connect("pressed", lambda g, n, x, y: self.current_path and self._popup(self.image_menu, x, y))
+            widget.add_controller(context)
 
         # Drag and drop files from Files
         drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
@@ -2159,9 +2263,8 @@ class ImageWindow(Adw.ApplicationWindow):
             action = "zoom-in"
         elif name in ("minus", "underscore", "KP_Subtract"):
             action = "zoom-out"
-        elif name == "space" and self.video.get_media_stream():
-            stream = self.video.get_media_stream()
-            stream.set_playing(not stream.get_playing())
+        elif name == "space" and self.stream:
+            self.stream.set_playing(not self.stream.get_playing())
             return True
         elif name == "Escape" and self.is_fullscreen():
             self.unfullscreen()
@@ -2211,10 +2314,11 @@ class ImageWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------ opening ---
 
     def on_open(self, *_):
-        dialog = Gtk.FileDialog(title="Open Image or Video", modal=True)
-        image_filter = Gtk.FileFilter(name="Images and Videos")
+        dialog = Gtk.FileDialog(title="Open File", modal=True)
+        image_filter = Gtk.FileFilter(name="Images, Videos and Music")
         image_filter.add_pixbuf_formats()
         image_filter.add_mime_type("video/*")
+        image_filter.add_mime_type("audio/*")
         filters = Gio.ListStore(item_type=Gtk.FileFilter)
         filters.append(image_filter)
         dialog.set_filters(filters)
@@ -2323,7 +2427,8 @@ class ImageWindow(Adw.ApplicationWindow):
             self.updating = False
         self.path_index = {item.path: i for i, item in enumerate(items)}
 
-        count = f"{len(items)} of {plural(total, 'image')}" if self.tag_filter else plural(total, "image")
+        noun = "image" if self.search else "file"  # tag searches only find images
+        count = f"{len(items)} of {plural(total, noun)}" if self.tag_filter else plural(total, noun)
         if self.search:
             joiner = " + " if self.search["all"] else " or "
             self.sidebar_title.set_title(joiner.join(self.search["tags"]))
@@ -2336,7 +2441,7 @@ class ImageWindow(Adw.ApplicationWindow):
         if not items:
             self.current_path = None
             self.view.set_texture(None)
-            self.stop_video()
+            self.stop_media()
             self.stack.set_visible_child_name("empty")
             self.update_title()
             self.update_actions()
@@ -2412,7 +2517,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.sidebar_title.set_title(APP_NAME)
         self.sidebar_title.set_subtitle("")
         self.view.set_texture(None)
-        self.stop_video()
+        self.stop_media()
         self.stack.set_visible_child_name("welcome")
         self.update_title()
         self.update_actions()
@@ -2536,10 +2641,10 @@ class ImageWindow(Adw.ApplicationWindow):
         self.current_mtime = item.mtime
         self.load_generation += 1
         generation = self.load_generation
-        self.stop_video()
-        if is_video(path):
+        self.stop_media()
+        if is_video(path) or is_audio(path):
             self.view.set_texture(None)
-            self.play_video(path)
+            self.play_media(path)
             self.update_title()
             self.update_actions()
             return
@@ -2565,28 +2670,66 @@ class ImageWindow(Adw.ApplicationWindow):
 
         run_in_thread(lambda: load_pixbuf(path), done)
 
-    def play_video(self, path):
-        stream = Gtk.MediaFile.new_for_filename(path)
-        stream.connect("notify::error", self._on_video_error)
+    def play_media(self, path):
+        stream = self.stream = Gtk.MediaFile.new_for_filename(path)
+        stream.connect("notify::error", self._on_media_error)
         stream.connect("notify::prepared", lambda *_: self.update_title())
-        self.video.set_media_stream(stream)
+        if is_audio(path):
+            stream.connect("notify::ended", self._on_song_ended)
+            self.music_controls.set_media_stream(stream)
+            self._show_song(path)
+            self.stack.set_visible_child_name("music")
+        else:
+            self.video.set_media_stream(stream)
+            self.stack.set_visible_child_name("video")
         stream.play()
-        self.stack.set_visible_child_name("video")
 
-    def _on_video_error(self, stream, _pspec):
-        if stream is not self.video.get_media_stream() or stream.get_error() is None:
+    def _show_song(self, path):
+        self.cover.set_from_icon_name("audio-x-generic-symbolic")
+        self.song_title.set_label(os.path.splitext(GLib.filename_display_basename(path))[0])
+        self.song_artist.set_visible(False)
+        self.song_album.set_visible(False)
+
+        def done(info, error):
+            if path != self.current_path or error is not None:
+                return
+            if info.get("cover"):
+                self.cover.set_from_paintable(Gdk.Texture.new_for_pixbuf(info["cover"]))
+            if info.get("title"):
+                self.song_title.set_label(info["title"])
+            for label, key in ((self.song_artist, "artist"), (self.song_album, "album")):
+                label.set_label(info.get(key, ""))
+                label.set_visible(bool(info.get(key)))
+
+        run_in_thread(lambda: song_info(path), done)
+
+    def _on_song_ended(self, stream, _pspec):
+        # Play on through the folder's songs, like an album
+        if stream is not self.stream or not stream.get_ended():
+            return
+        stream_path = self.current_path
+        index = self.path_index.get(stream_path)
+        if index is not None and index + 1 < self.store.get_n_items() \
+                and is_audio(self.store.get_item(index + 1).path):
+            # Not from inside the ended signal: a stream started there doesn't play
+            GLib.idle_add(lambda: self.current_path == stream_path and self.go(1) and False)
+
+    def _on_media_error(self, stream, _pspec):
+        if stream is not self.stream or stream.get_error() is None:
             return
         # GStreamer's message starts "Error from element /GstPlayBin:…: <reason>" and adds debug lines
         reason = stream.get_error().message.split("\n")[0].rpartition(": ")[2]
-        self.error_page.set_title("Could Not Play Video")
+        self.error_page.set_title("Could Not Play Music" if is_audio(self.current_path or "")
+                                  else "Could Not Play Video")
         self.error_page.set_description(GLib.markup_escape_text(reason))
         self.stack.set_visible_child_name("error")
 
-    def stop_video(self):
-        stream = self.video.get_media_stream()
-        if stream:
-            stream.pause()
+    def stop_media(self):
+        if self.stream:
+            self.stream.pause()
             self.video.set_media_stream(None)
+            self.music_controls.set_media_stream(None)
+            self.stream = None
 
     def update_title(self):
         index = self.path_index.get(self.current_path)
@@ -2597,7 +2740,7 @@ class ImageWindow(Adw.ApplicationWindow):
             return
         item = self.store.get_item(index)
         parts = [f"{index + 1} / {self.store.get_n_items()}"]
-        stream = self.video.get_media_stream()
+        stream = self.stream
         if self.view.texture is not None:
             parts.append(f"{self.view.texture.get_width()} × {self.view.texture.get_height()}")
         elif stream is not None and stream.is_prepared():
@@ -2756,7 +2899,7 @@ class ImageWindow(Adw.ApplicationWindow):
         if not paths:
             return
         verb = "Move" if move else "Copy"
-        dialog = Gtk.FileDialog(title=f"{verb} {plural(len(paths), 'Image')} to Folder", modal=True,
+        dialog = Gtk.FileDialog(title=f"{verb} {plural(len(paths), 'File')} to Folder", modal=True,
                                 accept_label=f"_{verb} Here")
         last = self.settings["last_target_folder"]
         if last and os.path.isdir(last):
@@ -2812,7 +2955,7 @@ class ImageWindow(Adw.ApplicationWindow):
                 self.toast("The images are already in that folder")
                 return
             folder_name = GLib.filename_display_basename(dest_dir)
-            message = f"{'Moved' if move else 'Copied'} {plural(len(moved), 'image')} to “{folder_name}”"
+            message = f"{'Moved' if move else 'Copied'} {plural(len(moved), 'file')} to “{folder_name}”"
             if renamed:
                 message += f" ({renamed} renamed to avoid overwriting)"
             if errors:
@@ -2846,7 +2989,7 @@ class ImageWindow(Adw.ApplicationWindow):
 
         def finished(restored, error):
             self.tag_index.move(restored or [])
-            self.toast(f"Moved {plural(len(restored or []), 'image')} back")
+            self.toast(f"Moved {plural(len(restored or []), 'file')} back")
             self.rescan(select_path=moved[0][0] if restored else None)
 
         run_in_thread(work, finished)
@@ -2923,7 +3066,7 @@ class ImageWindow(Adw.ApplicationWindow):
         use_trash = self.settings["use_trash"]
         if not use_trash or self.settings["confirm_delete"]:
             what = (f"“{GLib.filename_display_basename(paths[0])}”" if len(paths) == 1
-                    else plural(len(paths), "image"))
+                    else plural(len(paths), "file"))
             if use_trash:
                 dialog = Adw.AlertDialog(heading="Move to Trash?", body=f"{what} will be moved to the trash.")
                 label = "_Move to Trash"
@@ -2969,7 +3112,7 @@ class ImageWindow(Adw.ApplicationWindow):
             self.tag_index.remove(gone)
             removed = len(paths) - len(errors)
             verb = "Moved" if use_trash else "Deleted"
-            message = f"{verb} {plural(removed, 'image')}" + (" to the trash" if use_trash else "")
+            message = f"{verb} {plural(removed, 'file')}" + (" to the trash" if use_trash else "")
             if error is not None:
                 message = f"Delete failed: {error}"
             elif errors:
@@ -3005,7 +3148,7 @@ class ImageWindow(Adw.ApplicationWindow):
             self.split.set_show_sidebar(self.sidebar_before_fullscreen)
 
     def _on_close(self, *_):
-        self.stop_video()
+        self.stop_media()
         if self.monitor:
             self.monitor.cancel()
         self.settings.disconnect(self.settings_handler)
@@ -3114,11 +3257,11 @@ class Application(Adw.Application):
 
     def on_about(self, *_):
         about = Adw.AboutDialog(application_name=APP_NAME, application_icon=APP_ID,
-                                version=VERSION, comments="View, tag and organise photos and videos",
+                                version=VERSION, comments="View and organise your images, videos and music",
                                 license_type=Gtk.License.GPL_3_0, developer_name="Salvatore Turone",
                                 copyright="© 2026 Salvatore Turone",
-                                website="https://github.com/pst007xx/Image2-Viewer",
-                                issue_url="https://github.com/pst007xx/Image2-Viewer/issues")
+                                website="https://github.com/pst007xx/Glimpse",
+                                issue_url="https://github.com/pst007xx/Glimpse/issues")
         about.present(self.get_active_window())
 
 

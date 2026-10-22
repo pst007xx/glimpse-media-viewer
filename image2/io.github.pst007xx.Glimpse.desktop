@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Glimpse Image Viewer
+Comment=View and organise your images, videos and music
+Exec=@EXEC@ %U
+Icon=io.github.pst007xx.Glimpse
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;GTK;GNOME;
+Keywords=image;photo;picture;viewer;video;movie;music;audio;song;player;tag;organise;organize;
+StartupNotify=true
+DBusActivatable=false
+MimeType=image/avif;image/bmp;image/gif;image/heic;image/heif;image/ico;image/icon;image/jpeg;image/png;image/qtif;image/svg;image/svg+xml;image/svg+xml-compressed;image/svg-xml;image/tiff;image/vnd.adobe.svg+xml;image/vnd.microsoft.icon;image/webp;image/x-MS-bmp;image/x-bmp;image/x-icns;image/x-ico;image/x-icon;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;image/x-quicktime;image/x-tga;image/x-win-bitmap;image/x-wmf;image/x-xbitmap;image/x-xpixmap;video/mp4;video/x-m4v;video/quicktime;video/x-matroska;video/webm;video/vnd.avi;video/x-msvideo;video/avi;video/ogg;video/mpeg;video/x-ms-wmv;video/3gpp;video/x-flv;video/mp2t;audio/mpeg;audio/mp3;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/x-opus+ogg;audio/mp4;audio/x-m4a;audio/aac;audio/x-aac;audio/wav;audio/x-wav;audio/vnd.wave;audio/x-aiff;audio/x-ms-wma;audio/x-wavpack;audio/x-matroska;
