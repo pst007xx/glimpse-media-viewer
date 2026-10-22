@@ -41,10 +41,10 @@ description: |
 grade: stable
 confinement: strict
 license: GPL-3.0-or-later
-contact: https://github.com/pst007xx/Image2-Viewer
-website: https://github.com/pst007xx/Image2-Viewer
-source-code: https://github.com/pst007xx/Image2-Viewer
-issues: https://github.com/pst007xx/Image2-Viewer/issues
+contact: https://github.com/pst007xx/glimpse-media-viewer
+website: https://github.com/pst007xx/glimpse-media-viewer
+source-code: https://github.com/pst007xx/glimpse-media-viewer
+issues: https://github.com/pst007xx/glimpse-media-viewer/issues
 icon: icons/io.github.pst007xx.Glimpse-256.png
 
 apps:

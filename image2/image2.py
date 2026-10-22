@@ -3522,8 +3522,8 @@ class Application(Adw.Application):
                                 version=VERSION, comments="View and organise your images, videos and music",
                                 license_type=Gtk.License.GPL_3_0, developer_name="Salvatore Turone",
                                 copyright="© 2026 Salvatore Turone",
-                                website="https://github.com/pst007xx/Glimpse",
-                                issue_url="https://github.com/pst007xx/Glimpse/issues")
+                                website="https://github.com/pst007xx/glimpse-media-viewer",
+                                issue_url="https://github.com/pst007xx/glimpse-media-viewer/issues")
         about.present(self.get_active_window())
 
 
