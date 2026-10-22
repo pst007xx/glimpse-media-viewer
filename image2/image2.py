@@ -54,6 +54,10 @@ VERSION = "1.0"
 IN_SNAP = "SNAP" in os.environ
 
 THUMB_SIZE = 40
+SIDEBAR_MIN = 220
+CONTENT_MIN = 360     # the sidebar never widens past what leaves this much for the image
+TREE_INDENT = 20      # a folder row's indent per level (measured with Adwaita)
+TREE_ROW_EXTRA = 76   # a folder row's arrow, icon, spacing and padding around the name (72 measured)
 ZOOM_STEP = 1.25
 ZOOM_MIN = 0.02
 ZOOM_MAX = 32.0
@@ -146,8 +150,9 @@ HELP = [
              "When a song ends, the next music file in the list plays, so a folder of songs plays straight "
              "through. Step to another file at any time to stop."),
             ("Cover art",
-             "Glimpse shows the picture saved in the song, or else a cover.jpg, folder.jpg or front.jpg "
-             "in the same folder. The cover also appears as the song's thumbnail."),
+             "Glimpse shows the picture saved in the song, or else a cover.jpg, folder.jpg, front.jpg or "
+             "Windows Media Player AlbumArt picture in the same folder. The cover also appears as the "
+             "song's thumbnail."),
         ]),
         ("Zooming", [
             ("Zoom in and out",
@@ -158,7 +163,11 @@ HELP = [
             ("Pan around", "When zoomed in, drag the image or use the scrollbars."),
         ]),
         ("Window", [
-            ("Sidebar", "Show or hide the sidebar with its button or F9. It collapses automatically in narrow windows."),
+            ("Sidebar",
+             "Show or hide the sidebar with its button or F9. It collapses automatically in narrow windows."),
+            ("Sidebar width",
+             "Drag the sidebar's right edge to make it wider or narrower. When you open folders inside "
+             "folders, it widens by itself to show their full names, and goes back when you close them."),
             ("Fullscreen", "Press F11 or choose Fullscreen in the main menu. Escape leaves fullscreen."),
         ]),
     ]),
@@ -462,7 +471,7 @@ def scale_to_fit(pixbuf, size):
                                GdkPixbuf.InterpType.BILINEAR)
 
 
-COVER_NAMES = ("cover", "folder", "front", "album")
+COVER_NAMES = ("cover", "folder", "front", "album", "albumartsmall")
 COVER_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
 
@@ -504,13 +513,20 @@ def folder_cover(folder):
         names = os.listdir(folder)
     except OSError:
         return None
-    for name in sorted(names):
-        stem, ext = os.path.splitext(name.lower())
-        if stem in COVER_NAMES and ext in COVER_EXTENSIONS:
-            try:
-                return load_pixbuf(os.path.join(folder, name))
-            except GLib.Error:
-                pass
+    def rank(name):
+        # Windows Media Player saves "AlbumArt_{…}_Large.jpg"; prefer it to the small copies
+        stem = os.path.splitext(name.lower())[0]
+        if stem.startswith("albumart") and stem.endswith("large"):
+            return 1
+        return COVER_NAMES.index(stem) + 2 if stem in COVER_NAMES else None
+
+    found = sorted((rank(n), n) for n in names
+                   if os.path.splitext(n.lower())[1] in COVER_EXTENSIONS and rank(n) is not None)
+    for _, name in found:
+        try:
+            return load_pixbuf(os.path.join(folder, name))
+        except GLib.Error:
+            pass
     return None
 
 
@@ -748,6 +764,7 @@ class Settings(GObject.Object):
         "last_target_folder": "",
         "last_folder": "",
         "folders": [],                  # folders pinned in the sidebar
+        "sidebar_width": 280,           # as dragged; the sidebar widens beyond it to fit open folders
     }
 
     def __init__(self):
@@ -1734,9 +1751,19 @@ class ImageWindow(Adw.ApplicationWindow):
         self.selection_label = Gtk.Label(css_classes=["dim-label", "caption"])
         action_bar.pack_end(self.selection_label)
 
-        sidebar = Adw.ToolbarView(content=sidebar_paned)
-        sidebar.add_top_bar(sidebar_header)
-        sidebar.add_bottom_bar(action_bar)
+        sidebar_view = Adw.ToolbarView(content=sidebar_paned)
+        sidebar_view.add_top_bar(sidebar_header)
+        sidebar_view.add_bottom_bar(action_bar)
+
+        # A handle on the sidebar's edge: drag it to resize the sidebar
+        handle = Gtk.Box(width_request=8, halign=Gtk.Align.END, cursor=Gdk.Cursor.new_from_name("col-resize"))
+        resize = Gtk.GestureDrag()
+        resize.connect("drag-begin", lambda g, x, y: setattr(self, "resize_start", self.sidebar_width))
+        resize.connect("drag-update", self._on_sidebar_drag)
+        resize.connect("drag-end", lambda *_: self.settings.__setitem__("sidebar_width", self.sidebar_width))
+        handle.add_controller(resize)
+        sidebar = Gtk.Overlay(child=sidebar_view)
+        sidebar.add_overlay(handle)
 
         # Content: the image
         self.view = ImageView()
@@ -1833,8 +1860,14 @@ class ImageWindow(Adw.ApplicationWindow):
         self.content = Adw.ToolbarView(content=self.stack)
         self.content.add_top_bar(header)
 
-        self.split = Adw.OverlaySplitView(sidebar=sidebar, content=self.content,
-                                          min_sidebar_width=220, max_sidebar_width=360)
+        # The sidebar's width is set exactly (min = max), from the dragged width and the open folders
+        self.sidebar_width = self.settings["sidebar_width"]
+        self.split = Adw.OverlaySplitView(sidebar=sidebar, content=self.content, sidebar_width_fraction=1)
+        self.fit_source = None
+        self.folder_tree.connect("items-changed", lambda *_: self._queue_fit_sidebar())
+        for signal in ("map", "notify::default-width", "notify::maximized", "notify::fullscreened"):
+            self.connect(signal, lambda *_: self._queue_fit_sidebar())
+        self._fit_sidebar()
         self.split.bind_property("show-sidebar", self.sidebar_toggle, "active",
                                  GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.BIDIRECTIONAL)
 
@@ -1870,6 +1903,43 @@ class ImageWindow(Adw.ApplicationWindow):
         self.folder_menu.set_parent(self.folder_view)
 
         self.stack.set_visible_child_name("welcome")
+
+    # ------------------------------------------------------------ sidebar ---
+
+    def _on_sidebar_drag(self, gesture, dx, dy):
+        self.sidebar_width = max(SIDEBAR_MIN, min(round(self.resize_start + dx), self._sidebar_limit()))
+        self._fit_sidebar()
+
+    def _sidebar_limit(self):
+        """Widest the sidebar may get, leaving room for the image."""
+        return max(SIDEBAR_MIN, (self.get_width() or self.get_default_size()[0]) - CONTENT_MIN)
+
+    def _queue_fit_sidebar(self):
+        # Expanding a folder changes the tree several times in a row: fit once afterwards
+        # (and a resized window has its new width only after a moment)
+        if self.fit_source is None:
+            self.fit_source = GLib.timeout_add(50, self._on_fit_timeout)
+
+    def _on_fit_timeout(self):
+        self.fit_source = None
+        self._fit_sidebar()
+        return False
+
+    def _fit_sidebar(self):
+        width = max(self.sidebar_width, min(self._tree_width(), self._sidebar_limit()))
+        self.split.set_min_sidebar_width(width)
+        self.split.set_max_sidebar_width(width)
+
+    def _tree_width(self):
+        """Width the sidebar needs to show every visible folder's name in full."""
+        layout = self.folder_view.create_pango_layout("")
+        widest = 0
+        for i in range(self.folder_tree.get_n_items()):
+            row = self.folder_tree.get_item(i)
+            layout.set_attributes(_BOLD if row.get_depth() == 0 else None)
+            layout.set_text(row.get_item().name, -1)
+            widest = max(widest, row.get_depth() * TREE_INDENT + layout.get_pixel_size()[0])
+        return widest + TREE_ROW_EXTRA
 
     # ---------------------------------------------------------- list rows ---
 
