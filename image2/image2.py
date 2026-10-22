@@ -488,9 +488,10 @@ def song_info(path):
             if tags is None:
                 continue
             for key in ("title", "artist", "album"):
-                ok, value = tags.get_string(key)
-                if ok and value and key not in info:
-                    info[key] = value
+                # ID3 tags separate several values with "/", which GStreamer splits apart: put "AC/DC" back
+                values = [tags.get_string_index(key, i)[1] for i in range(tags.get_tag_size(key))]
+                if any(values) and key not in info:
+                    info[key] = "/".join(v for v in values if v)
             for key in ("image", "preview-image"):
                 ok, sample = tags.get_sample(key)
                 if ok and "cover" not in info:
