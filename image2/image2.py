@@ -174,17 +174,20 @@ HELP = [
     ("Organising", "folder-symbolic", [
         ("Pinned Folders", [
             ("Pin folders",
-             "Click + above Folders, choose Pin Current Folder to Sidebar in the main menu, or drag folders "
-             "from Files onto the Folders list. Your Pictures folder is pinned the first time Glimpse starts."),
+             "Use the pin button or + at the top of the sidebar, choose Pin Current Folder to Sidebar in the "
+             "main menu, or drag folders from Files onto the Folders list. Your Pictures folder is pinned the "
+             "first time Glimpse starts."),
             ("Browse subfolders", "Expand a folder with its arrow; click any folder to show its images."),
             ("Manage pinned folders",
              "Click the pin button at the top of the sidebar, or choose Manage Pinned Folders… in the main "
-             "menu or a folder's right-click menu. On the left, browse to a folder, starting from Home, "
-             "Drives or Computer: click a folder to open it and Up to go back. Pin the folder you're in "
-             "with the big button, or any folder in the list with its pin. On the right are your pinned "
-             "folders: unpin one with its bin button, change the order with the arrows (Alt+1…9 uses it), "
-             "or click one to browse it. A folder on a disconnected drive is marked with a warning and "
-             "comes back when the drive does."),
+             "menu or a folder's right-click menu. It opens on your pinned folders: Unpin removes one from "
+             "the sidebar, the arrows change their order (Alt+1…9 uses it), and a folder on a disconnected "
+             "drive is marked with a warning until the drive is back."),
+            ("Add pinned folders",
+             "Click Add Folders… (or + above Folders in the sidebar). Start from Home Folder, Drives or "
+             "Computer, click a folder to open it and Up to go back, then pin the folder you're in with the "
+             "big button, or any folder in the list with its pin button; click a blue pin to unpin. The "
+             "Pinned Folders button at the top takes you back to the list of pinned folders."),
             ("Folder menu",
              "Right-click a folder to open it, show it in Files, move or copy the selected images into it, "
              "create a new subfolder, or pin/unpin it."),
@@ -1297,126 +1300,58 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
 
 class PinnedFoldersDialog(Adw.Dialog):
-    """Browse to folders and pin them; see, reorder and unpin the pinned ones."""
+    """Two pages: the pinned folders (unpin, reorder, Add Folders), and a browser to pin more,
+    whose Home button goes back to the pinned folders."""
 
-    def __init__(self, settings):
-        super().__init__(title="Pinned Folders", content_width=860, content_height=580)
+    def __init__(self, settings, browse=False):
+        super().__init__(title="Pinned Folders", content_width=620, content_height=600)
         self.settings = settings
         self.folder = None
-
-        # Left: a folder browser
-        places = Gtk.Box(css_classes=["linked"])
-        home = GLib.get_home_dir()
-        user_media = os.path.join("/media", GLib.get_user_name())
-        for icon, label, path in (("user-home-symbolic", "Home", home),
-                                  ("drive-harddisk-symbolic", "Drives",
-                                   user_media if os.path.isdir(user_media) else "/media"),
-                                  ("computer-symbolic", "Computer", "/")):
-            button = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=label))
-            button.connect("clicked", lambda b, p=path: self.browse(p))
-            places.append(button)
-        self.up_button = Gtk.Button(icon_name="go-up-symbolic", tooltip_text="Up to the Parent Folder")
-        self.up_button.connect("clicked", lambda *_: self.browse(os.path.dirname(self.folder)))
-        self.path_label = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.START,
-                                    css_classes=["dim-label"])
-        path_bar = Gtk.Box(spacing=6)
-        path_bar.append(self.up_button)
-        path_bar.append(self.path_label)
-
-        self.subfolders = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"],
-                                      valign=Gtk.Align.START)
-        self.subfolders.connect("row-activated", lambda box, row: self.browse(row.path))
-        scroller = Gtk.ScrolledWindow(child=self.subfolders, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.pin_button = Gtk.Button(css_classes=["pill", "suggested-action"], halign=Gtk.Align.CENTER)
-        self.pin_button.connect("clicked", lambda *_: self.toggle_pin(self.folder))
-
-        browser = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True,
-                          margin_start=18, margin_end=18, margin_top=12, margin_bottom=18)
-        browser.append(Gtk.Label(label="Browse", xalign=0, css_classes=["heading"]))
-        browser.append(places)
-        browser.append(path_bar)
-        browser.append(scroller)
-        browser.append(self.pin_button)
-
-        # Right: the pinned folders, in sidebar order
-        self.pinned = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"],
-                                  valign=Gtk.Align.START)
-        self.pinned.connect("row-activated", lambda box, row: row.available and self.browse(row.path))
-        pinned_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, width_request=330,
-                             margin_start=18, margin_end=18, margin_top=12, margin_bottom=18)
-        pinned_box.append(Gtk.Label(label="Pinned", xalign=0, css_classes=["heading"]))
-        pinned_box.append(Gtk.Label(
-            label="Shown under Folders in the sidebar. Alt+1…9 moves files into the folder with that "
-                  "number; Ctrl+Alt+1…9 copies them.",
-            xalign=0, wrap=True, css_classes=["dim-label", "caption"]))
-        pinned_box.append(Gtk.ScrolledWindow(child=self.pinned, vexpand=True,
-                                             hscrollbar_policy=Gtk.PolicyType.NEVER))
-
-        panes = Gtk.Box()
-        panes.append(browser)
-        panes.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        panes.append(pinned_box)
-        view = Adw.ToolbarView(content=panes)
-        view.add_top_bar(Adw.HeaderBar())
-        self.set_child(view)
+        self.toasts = Adw.ToastOverlay()
+        self.pages = Adw.NavigationView()
+        self.toasts.set_child(self.pages)
+        self.set_child(self.toasts)
+        self.pages.add(self._pinned_page())
+        self.pages.add(self._browse_page())
 
         handler = settings.connect("changed", self._on_settings_changed)
         self.connect("closed", lambda *_: settings.disconnect(handler))
         self._show_pinned()
-        folders = [f for f in settings["folders"] if os.path.isdir(f)]
-        self.browse(settings["last_folder"] if os.path.isdir(settings["last_folder"] or "")
-                    else folders[0] if folders else home)
+        if browse:
+            self.add_folders()
 
-    def _on_settings_changed(self, settings, key):
-        if key == "folders":
-            self._show_pinned()
-            self.browse(self.folder)  # refresh the pin buttons
-        elif key == "show_hidden":
-            self.browse(self.folder)
+    # -- home: the pinned folders
 
-    def is_pinned(self, path):
-        return path in self.settings["folders"]
-
-    def toggle_pin(self, path):
-        folders = self.settings["folders"]
-        self.settings["folders"] = [f for f in folders if f != path] if path in folders else folders + [path]
-
-    def browse(self, path):
-        self.folder = path
-        self.path_label.set_label(GLib.filename_display_name(path))
-        self.path_label.set_tooltip_text(GLib.filename_display_name(path))
-        self.up_button.set_sensitive(path != "/")
-        pinned = self.is_pinned(path)
-        name = GLib.filename_display_basename(path) if path != "/" else "Computer"
-        self.pin_button.set_label(f"Unpin “{name}”" if pinned else f"Pin “{name}”")
-        self.pin_button.set_css_classes(["pill"] if pinned else ["pill", "suggested-action"])
-
-        self.subfolders.remove_all()
-        children = list_subfolders(path, self.settings["show_hidden"])
-        if not children:
-            self.subfolders.append(Adw.ActionRow(title="No folders inside", activatable=False))
-        for node in children:
-            row = Adw.ActionRow(title=GLib.markup_escape_text(node.name), activatable=True)
-            row.path = node.path
-            row.add_prefix(Gtk.Image(icon_name="folder-symbolic"))
-            row.add_suffix(self._pin_toggle(node.path))
-            row.add_suffix(Gtk.Image(icon_name="go-next-symbolic", css_classes=["dim-label"]))
-            self.subfolders.append(row)
-
-    def _pin_toggle(self, path):
-        pinned = self.is_pinned(path)
-        button = Gtk.Button(icon_name="view-pin-symbolic", valign=Gtk.Align.CENTER,
-                            tooltip_text="Unpin" if pinned else "Pin",
-                            css_classes=["circular", "suggested-action"] if pinned else ["circular", "flat"])
-        button.connect("clicked", lambda *_: self.toggle_pin(path))
-        return button
+    def _pinned_page(self):
+        add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add Folders")
+        add.connect("clicked", lambda *_: self.add_folders())
+        header = Adw.HeaderBar()
+        header.pack_start(add)
+        self.pinned = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"],
+                                  valign=Gtk.Align.START)
+        self.pinned.connect("row-activated", lambda box, row: row.available and self.add_folders(row.path))
+        add_button = Gtk.Button(label="_Add Folders…", use_underline=True, halign=Gtk.Align.CENTER,
+                                css_classes=["pill", "suggested-action"])
+        add_button.connect("clicked", lambda *_: self.add_folders())
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                      margin_start=18, margin_end=18, margin_top=6, margin_bottom=18)
+        box.append(Gtk.Label(
+            label="These folders are shown under Folders in the sidebar. Alt+1…9 moves files into the "
+                  "folder with that number; Ctrl+Alt+1…9 copies them.",
+            xalign=0, wrap=True, css_classes=["dim-label"]))
+        box.append(Gtk.ScrolledWindow(child=self.pinned, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        box.append(add_button)
+        view = Adw.ToolbarView(content=box)
+        view.add_top_bar(header)
+        return Adw.NavigationPage(title="Pinned Folders", tag="pinned", child=view)
 
     def _show_pinned(self):
         self.pinned.remove_all()
         folders = self.settings["folders"]
         if not folders:
-            self.pinned.append(Adw.ActionRow(title="Nothing pinned yet",
-                                             subtitle="Browse to a folder and pin it.", activatable=False))
+            self.pinned.append(Adw.ActionRow(title="No pinned folders",
+                                             subtitle="Click Add Folders to pin the folders you use most.",
+                                             activatable=False))
         for index, path in enumerate(folders):
             available = os.path.isdir(path)
             row = Adw.ActionRow(title=GLib.markup_escape_text(GLib.filename_display_basename(path) or path),
@@ -1436,8 +1371,7 @@ class PinnedFoldersDialog(Adw.Dialog):
                                     sensitive=sensitive, css_classes=["flat"])
                 button.connect("clicked", lambda b, i=index, t=target: self._move(i, t))
                 row.add_suffix(button)
-            unpin = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Unpin", valign=Gtk.Align.CENTER,
-                               css_classes=["flat"])
+            unpin = Gtk.Button(label="Unpin", valign=Gtk.Align.CENTER, css_classes=["destructive-action"])
             unpin.connect("clicked", lambda b, p=path: self.toggle_pin(p))
             row.add_suffix(unpin)
             self.pinned.append(row)
@@ -1446,6 +1380,106 @@ class PinnedFoldersDialog(Adw.Dialog):
         folders = list(self.settings["folders"])
         folders.insert(target, folders.pop(index))
         self.settings["folders"] = folders
+
+    # -- add folders: browse and pin
+
+    def _browse_page(self):
+        home_button = Gtk.Button(child=Adw.ButtonContent(icon_name="go-home-symbolic", label="Pinned Folders"),
+                                 tooltip_text="Back to the Pinned Folders")
+        home_button.connect("clicked", lambda *_: self.pages.pop_to_tag("pinned"))
+        header = Adw.HeaderBar(show_back_button=False)
+        header.pack_start(home_button)
+
+        places = Gtk.Box(css_classes=["linked"], halign=Gtk.Align.START)
+        home = GLib.get_home_dir()
+        user_media = os.path.join("/media", GLib.get_user_name())
+        for icon, label, path in (("user-home-symbolic", "Home Folder", home),
+                                  ("drive-harddisk-symbolic", "Drives",
+                                   user_media if os.path.isdir(user_media) else "/media"),
+                                  ("computer-symbolic", "Computer", "/")):
+            button = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=label))
+            button.connect("clicked", lambda b, p=path: self.browse(p))
+            places.append(button)
+        self.up_button = Gtk.Button(icon_name="go-up-symbolic", tooltip_text="Up to the Parent Folder")
+        self.up_button.connect("clicked", lambda *_: self.browse(os.path.dirname(self.folder)))
+        self.path_label = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.START,
+                                    css_classes=["dim-label"])
+        path_bar = Gtk.Box(spacing=6)
+        path_bar.append(self.up_button)
+        path_bar.append(self.path_label)
+
+        self.subfolders = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"],
+                                      valign=Gtk.Align.START)
+        self.subfolders.connect("row-activated", lambda box, row: hasattr(row, "path") and self.browse(row.path))
+        self.pin_button = Gtk.Button(halign=Gtk.Align.CENTER)
+        self.pin_button.connect("clicked", lambda *_: self.toggle_pin(self.folder))
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                      margin_start=18, margin_end=18, margin_top=6, margin_bottom=18)
+        box.append(Gtk.Label(label="Open a folder by clicking it, then pin it, or pin a folder in the "
+                                   "list with its pin button.", xalign=0, wrap=True, css_classes=["dim-label"]))
+        box.append(places)
+        box.append(path_bar)
+        box.append(Gtk.ScrolledWindow(child=self.subfolders, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        box.append(self.pin_button)
+        view = Adw.ToolbarView(content=box)
+        view.add_top_bar(header)
+        return Adw.NavigationPage(title="Add Folders", tag="browse", child=view)
+
+    def add_folders(self, start=None):
+        """Show the browser, at start or the folder last viewed."""
+        if start is None:
+            last = self.settings["last_folder"]
+            start = self.folder or (last if last and os.path.isdir(last) else GLib.get_home_dir())
+        self.browse(start)
+        if self.pages.get_visible_page().get_tag() != "browse":
+            self.pages.push_by_tag("browse")
+
+    def browse(self, path):
+        self.folder = path
+        self.path_label.set_label(GLib.filename_display_name(path))
+        self.path_label.set_tooltip_text(GLib.filename_display_name(path))
+        self.up_button.set_sensitive(path != "/")
+        pinned = path in self.settings["folders"]
+        name = GLib.filename_display_basename(path) if path != "/" else "Computer"
+        self.pin_button.set_child(Adw.ButtonContent(icon_name="view-pin-symbolic",
+                                                    label=f"Unpin “{name}”" if pinned else f"Pin “{name}”"))
+        self.pin_button.set_css_classes(["pill", "destructive-action"] if pinned else ["pill", "suggested-action"])
+
+        self.subfolders.remove_all()
+        children = list_subfolders(path, self.settings["show_hidden"])
+        if not children:
+            self.subfolders.append(Adw.ActionRow(title="No folders inside", activatable=False))
+        for node in children:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(node.name), activatable=True)
+            row.path = node.path
+            row.add_prefix(Gtk.Image(icon_name="folder-symbolic"))
+            pinned = node.path in self.settings["folders"]
+            button = Gtk.Button(icon_name="view-pin-symbolic", valign=Gtk.Align.CENTER,
+                                tooltip_text="Unpin" if pinned else "Pin",
+                                css_classes=["circular", "suggested-action"] if pinned else ["circular", "flat"])
+            button.connect("clicked", lambda b, p=node.path: self.toggle_pin(p))
+            row.add_suffix(button)
+            row.add_suffix(Gtk.Image(icon_name="go-next-symbolic", css_classes=["dim-label"]))
+            self.subfolders.append(row)
+
+    def toggle_pin(self, path):
+        folders = self.settings["folders"]
+        name = GLib.filename_display_basename(path) if path != "/" else "Computer"
+        if path in folders:
+            self.settings["folders"] = [f for f in folders if f != path]
+            self.toasts.add_toast(Adw.Toast(title=f"Unpinned “{name}”", timeout=2))
+        else:
+            self.settings["folders"] = folders + [path]
+            self.toasts.add_toast(Adw.Toast(title=f"Pinned “{name}”", timeout=2))
+
+    def _on_settings_changed(self, settings, key):
+        if key == "folders":
+            self._show_pinned()
+            if self.folder:
+                self.browse(self.folder)  # refresh the pin buttons
+        elif key == "show_hidden" and self.folder:
+            self.browse(self.folder)
 
 
 def edit_tags(tags, add=(), remove=(), rename=None):
@@ -2328,17 +2362,7 @@ class ImageWindow(Adw.ApplicationWindow):
         return added
 
     def on_add_folder(self, *_):
-        dialog = Gtk.FileDialog(title="Pin Folders to Sidebar", accept_label="_Pin", modal=True)
-
-        def done(dialog, result):
-            try:
-                files = dialog.select_multiple_folders_finish(result)
-            except GLib.Error:
-                return
-            self.pin_folders([files.get_item(i).get_path() for i in range(files.get_n_items())
-                              if files.get_item(i).get_path()])
-
-        dialog.select_multiple_folders(self, None, done)
+        PinnedFoldersDialog(self.settings, browse=True).present(self)
 
     def on_unpin_folder(self, action, param):
         path = param.get_string()
