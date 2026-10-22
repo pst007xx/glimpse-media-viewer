@@ -64,7 +64,7 @@ apps:
     environment:
       PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
       # GTK's own file dialog and drag-and-drop see real paths (with the home plug),
-      # so opening an image can show its whole folder. See IN_SNAP in image2.py.
+      # so opening an image can show its whole folder. See IN_SNAP in glimpse.py.
       GDK_DEBUG: no-portals
       # GTK finds its video module (media/libmedia-gstreamer.so, from the video part) here
       GTK_PATH: $SNAP/usr/lib/x86_64-linux-gnu/gtk-4.0
@@ -85,7 +85,7 @@ parts:
       - gir1.2-gexiv2-0.10   # Properties: camera details and tags (brings libgexiv2 and libexiv2)
     override-build: |
       craftctl default
-      install -Dm755 image2.py "$CRAFT_PART_INSTALL/bin/glimpse"
+      install -Dm755 glimpse.py "$CRAFT_PART_INSTALL/bin/glimpse"
       for size in 48 64 128 256; do
         install -Dm644 icons/io.github.pst007xx.Glimpse-$size.png \
           "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/${size}x${size}/apps/io.github.pst007xx.Glimpse.png"

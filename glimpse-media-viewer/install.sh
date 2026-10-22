@@ -5,7 +5,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 bin="$HOME/.local/bin"
 apps="$HOME/.local/share/applications"
 mkdir -p "$bin" "$apps"
-install -m 755 "$here/image2.py" "$bin/glimpse"
+install -m 755 "$here/glimpse.py" "$bin/glimpse"
 sed "s|@EXEC@|$bin/glimpse|" "$here/io.github.pst007xx.Glimpse.desktop" > "$apps/io.github.pst007xx.Glimpse.desktop"
 icons="$HOME/.local/share/icons/hicolor"
 for size in 48 64 128 256; do
