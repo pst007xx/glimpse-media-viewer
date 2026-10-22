@@ -211,25 +211,8 @@ HELP = [
              "permanent deletion always asks first."),
         ]),
     ]),
-    ("Other Apps & More", "document-edit-symbolic", [
-        ("Other Apps", [
-            ("Open With…",
-             "Pick any installed app, such as an editor, for the current image. When that app saves, "
-             "Glimpse reloads the image automatically."),
-            ("Open Containing Folder", "Shows the current image in your file manager."),
-        ]),
-        ("Properties & Tags", [
-            ("See an image's details",
-             "Use the properties button or press Alt+Enter for the file's size, dimensions and dates, and "
-             "camera details such as exposure, aperture and ISO when the photo has them."),
-            ("Tag images",
-             "In Properties, type tags and press Enter; separate several with commas. Rename a tag with its "
-             "pencil button, or remove it with ×. Tags are saved inside the image as standard keywords, so "
-             "other photo apps such as darktable, digiKam and Shotwell can read them."),
-            ("Tag several images at once",
-             "Select images (Ctrl+click, Shift+click or Ctrl+A), then open Properties. Tags you add, rename or "
-             "remove change in every selected image. A tag only some of them have shows how many, and + adds "
-             "it to the rest."),
+    ("Search", "system-search-symbolic", [
+        ("Search Pinned Folders", [
             ("Search your pinned folders",
              "Press Ctrl+F or use the search button by Folders. Search looks through every pinned folder and "
              "its subfolders. Type part of a name, choose a type (images, videos, music or one format), pick "
@@ -249,6 +232,27 @@ HELP = [
              "calendars. Which Date picks the date to use. Date Taken is when a photo was taken, read from its "
              "camera details; videos, music and images without that date don't match. Date Modified is when "
              "a file was last changed, which every file has."),
+        ]),
+    ]),
+    ("Other Apps & More", "document-edit-symbolic", [
+        ("Other Apps", [
+            ("Open With…",
+             "Pick any installed app, such as an editor, for the current image. When that app saves, "
+             "Glimpse reloads the image automatically."),
+            ("Open Containing Folder", "Shows the current image in your file manager."),
+        ]),
+        ("Properties & Tags", [
+            ("See an image's details",
+             "Use the properties button or press Alt+Enter for the file's size, dimensions and dates, and "
+             "camera details such as exposure, aperture and ISO when the photo has them."),
+            ("Tag images",
+             "In Properties, type tags and press Enter; separate several with commas. Rename a tag with its "
+             "pencil button, or remove it with ×. Tags are saved inside the image as standard keywords, so "
+             "other photo apps such as darktable, digiKam and Shotwell can read them."),
+            ("Tag several images at once",
+             "Select images (Ctrl+click, Shift+click or Ctrl+A), then open Properties. Tags you add, rename or "
+             "remove change in every selected image. A tag only some of them have shows how many, and + adds "
+             "it to the rest."),
             ("Show and sort by tag",
              "Each image's tags appear under its name. Use the menu next to Images to show only the images "
              "with one tag, or the untagged ones, and to sort by name, date modified or tag."),
