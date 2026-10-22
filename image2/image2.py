@@ -3114,7 +3114,7 @@ class Application(Adw.Application):
 
     def on_about(self, *_):
         about = Adw.AboutDialog(application_name=APP_NAME, application_icon=APP_ID,
-                                version=VERSION, comments="A simple image viewer for GNOME",
+                                version=VERSION, comments="View, tag and organise photos and videos",
                                 license_type=Gtk.License.GPL_3_0, developer_name="Salvatore Turone",
                                 copyright="© 2026 Salvatore Turone",
                                 website="https://github.com/pst007xx/Image2-Viewer",

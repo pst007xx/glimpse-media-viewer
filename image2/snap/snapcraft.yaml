@@ -2,18 +2,36 @@ name: image2-viewer
 base: core24
 version: '1.0'
 title: Image2-Viewer
-summary: View and organise your images
+summary: View, tag and organise your photos and videos
 description: |
-  Image2-Viewer is a simple image viewer and organiser that fits right into GNOME.
+  Image2-Viewer is a fast, simple image viewer and organiser that fits right into GNOME.
+  Open a photo and every image and video in its folder is ready to browse in the sidebar.
 
-  * Browse every image in a folder, with thumbnails in the sidebar
-  * Play videos right in the main window
-  * Zoom with buttons, keyboard, Ctrl+scroll or pinch
-  * Pin folders to the sidebar and drag images onto them to organise,
+  **View**
+  * Thumbnails of every image and video in the folder
+  * Zoom with buttons, keyboard, Ctrl+scroll or pinch, and drag to pan
+  * Play videos in the main window: MP4, MOV, MKV, WebM, AVI and more,
+    with H.264, HEVC, VP9 and other common codecs
+  * Fullscreen viewing, and JPEG, PNG, WebP, HEIC, AVIF, TIFF, SVG, GIF and other images
+
+  **Organise**
+  * Pin your photo folders to the sidebar and drag images onto them to move or copy,
     with undo and Alt+1…9 quick-move keys
-  * Copy, move, rename and delete several images at once
-  * Set any image as your wallpaper: original size, zoom or stretch to fill
-  * Open images in another app for editing
+  * Copy, move, rename and delete several files at once, to the trash or permanently
+  * Set any image as your wallpaper
+
+  **Tag and find**
+  * Add, rename and remove tags on one image or many at once; tags are saved in the
+    image (XMP and IPTC keywords), so other photo apps can read them too
+  * Show only the images with a tag, or sort them by tag
+  * Find by Tag searches every pinned folder, even large libraries on external drives
+
+  **More**
+  * Properties shows file and camera details: camera, lens, exposure and date taken
+  * Open files in another app, or show them in Files
+
+  To use photos on external drives, connect the removable-media interface:
+  snap connect image2-viewer:removable-media
 grade: stable
 confinement: strict
 license: GPL-3.0-or-later
