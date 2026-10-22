@@ -17,10 +17,10 @@ description: |
 grade: stable
 confinement: strict
 license: GPL-3.0-or-later
-contact: https://github.com/pst007xx/image2
-website: https://github.com/pst007xx/image2
-source-code: https://github.com/pst007xx/image2
-issues: https://github.com/pst007xx/image2/issues
+contact: https://github.com/pst007xx/Image2-Viewer
+website: https://github.com/pst007xx/Image2-Viewer
+source-code: https://github.com/pst007xx/Image2-Viewer
+issues: https://github.com/pst007xx/Image2-Viewer/issues
 icon: icons/io.github.imagery.Image2.svg
 
 apps:

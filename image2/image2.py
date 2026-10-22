@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Salvatore Turone
 """Image2-Viewer — a simple image viewer for GNOME, built with GTK 4 and libadwaita."""
 
 import filecmp
@@ -3113,7 +3115,10 @@ class Application(Adw.Application):
     def on_about(self, *_):
         about = Adw.AboutDialog(application_name=APP_NAME, application_icon=APP_ID,
                                 version=VERSION, comments="A simple image viewer for GNOME",
-                                license_type=Gtk.License.GPL_3_0)
+                                license_type=Gtk.License.GPL_3_0, developer_name="Salvatore Turone",
+                                copyright="© 2026 Salvatore Turone",
+                                website="https://github.com/pst007xx/Image2-Viewer",
+                                issue_url="https://github.com/pst007xx/Image2-Viewer/issues")
         about.present(self.get_active_window())
 
 
