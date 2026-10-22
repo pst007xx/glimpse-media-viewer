@@ -47,7 +47,7 @@ METADATA_LOCK = threading.Lock()
 
 APP_ID = "io.github.pst007xx.Glimpse"
 APP_NAME = "Glimpse Image Viewer"
-VERSION = "1.0"
+VERSION = "1.0.1"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
 # dialogs and drag-and-drop give real paths; host apps are reached via portal_open().
