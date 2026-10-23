@@ -253,9 +253,12 @@ HELP = [
              "Select images (Ctrl+click, Shift+click or Ctrl+A), then open Properties. Tags you add, rename or "
              "remove change in every selected image. A tag only some of them have shows how many, and + adds "
              "it to the rest."),
-            ("Show and sort by tag",
-             "Each image's tags appear under its name. Use the menu next to Images to show only the images "
-             "with one tag, or the untagged ones, and to sort by name, date modified or tag."),
+            ("Show and sort",
+             "Each image's tags appear under its name. Use the menu next to Files to show all files, or only "
+             "the images, videos or music, or only the images with one tag, or the untagged ones. The same "
+             "menu sorts by name, date taken, date modified, type or tag, whatever is shown. Date Taken puts "
+             "files that don't record one, such as videos and music, by their date modified. Type groups "
+             "images, then videos, then music, each by format."),
         ]),
         ("Wallpaper", [
             ("Set as wallpaper",
@@ -267,7 +270,8 @@ HELP = [
              "wallpaper keeps working if you later move or delete the original."),
         ]),
         ("Preferences", [
-            ("Image list", "Turn thumbnails on or off, show hidden files, and sort by name, date modified or tag."),
+            ("Image list", "Turn thumbnails on or off, show hidden files, and sort by name, date taken, "
+             "date modified, type or tag."),
             ("Supported formats", "See File Types for every image, video and music format Glimpse opens."),
         ]),
     ]),
@@ -842,7 +846,7 @@ class Settings(GObject.Object):
         "confirm_delete": True,
         "show_thumbnails": True,
         "show_hidden": False,
-        "sort_by": "name",              # name | date | tag
+        "sort_by": "name",              # name | taken | date | type | tag
         "last_target_folder": "",
         "last_folder": "",
         "folders": [],                  # folders pinned in the sidebar
@@ -893,9 +897,10 @@ class ImageItem(GObject.Object):
         self.mtime = mtime
         self.size = size
         self.tags = None  # filled in from TagIndex; None until read
+        self.taken = None  # when a photo was taken, from TagIndex; None if unknown
 
 
-def scan_folder(folder, sort_by, show_hidden):
+def scan_folder(folder, show_hidden):
     items = []
     try:
         entries = list(os.scandir(folder))
@@ -911,27 +916,40 @@ def scan_folder(folder, sort_by, show_hidden):
         except OSError:
             continue
         items.append(ImageItem(entry.path, st.st_mtime_ns, st.st_size))
-
-    def name_key(item):
-        return GLib.utf8_collate_key_for_filename(item.display_name, -1)
-
-    if sort_by == "date":
-        items.sort(key=lambda i: (i.mtime, name_key(i)))
-    else:
-        items.sort(key=name_key)
     return items
 
 
-SORT_OPTIONS = [("name", "Name"), ("date", "Date Modified"), ("tag", "Tag")]
+SORT_OPTIONS = [("name", "Name"), ("taken", "Date Taken"), ("date", "Date Modified"), ("type", "Type"),
+                ("tag", "Tag")]
 UNTAGGED = "\x01untagged"  # tag-filter value for images without tags; can't be a real tag
+# tag-filter values showing one kind of file: (value, menu label, button label, test)
+KIND_FILTERS = [("\x01image", "Only Images", "Images", is_image), ("\x01video", "Only Videos", "Videos", is_video),
+                ("\x01audio", "Only Music", "Music", is_audio)]
 
 
-def sort_by_tag(items):
-    """Group images under their alphabetically first tag; untagged ones go last. Keeps name order within."""
-    def key(item):
-        tags = sorted(t.casefold() for t in item.tags or [])
-        return (0, tags[0]) if tags else (1, "")
-    return sorted(items, key=key)
+def sort_items(items, sort_by):
+    """Items in Sort By order, with name order within each date, type or tag.
+
+    Date Taken puts files that don't record one (videos, music, some images) by their modified
+    date instead. Type groups images, then videos, then music, each by format. Tag groups images
+    under their alphabetically first tag, with untagged ones last.
+    """
+    def name(item):
+        return GLib.utf8_collate_key_for_filename(item.display_name, -1), item.path
+
+    def kind(item):
+        return 0 if is_image(item.name) else 1 if is_video(item.name) else 2
+
+    def first_tag(item):
+        return (0, min(t.casefold() for t in item.tags)) if item.tags else (1, "")
+
+    keys = {
+        "taken": lambda i: (i.taken or i.mtime, name(i)),
+        "date": lambda i: (i.mtime, name(i)),
+        "type": lambda i: (kind(i), os.path.splitext(i.name)[1].lower(), name(i)),
+        "tag": lambda i: (first_tag(i), name(i)),
+    }
+    return sorted(items, key=keys.get(sort_by, name))
 
 
 def read_file_info(path):
@@ -1004,17 +1022,17 @@ class TagIndex:
     # Folder view
 
     def lookup(self, items):
-        """{path: tags} for the items whose indexed modified time still matches."""
+        """{path: (tags, taken)} for the items whose indexed modified time still matches."""
         wanted = {i.path: i.mtime for i in items}
-        found = {path: [] for path in wanted if not _storable(path)}
+        found = {path: ([], None) for path in wanted if not _storable(path)}
         paths = [path for path in wanted if path not in found]
         for start in range(0, len(paths), 500):
             chunk = paths[start:start + 500]
-            rows = self.db.execute(f"SELECT path, mtime, tags FROM images WHERE path IN "
+            rows = self.db.execute(f"SELECT path, mtime, tags, taken FROM images WHERE path IN "
                                    f"({','.join('?' * len(chunk))})", chunk)
-            for path, mtime, tags in rows:
+            for path, mtime, tags, taken in rows:
                 if wanted[path] == mtime:
-                    found[path] = json.loads(tags)
+                    found[path] = (json.loads(tags), taken)
         return found
 
     def load(self, items, done):
@@ -1104,11 +1122,11 @@ class TagIndex:
                 list(folded) + params + [len(folded) if match_all else 1])
 
     def find(self, roots, folded=(), match_all=False, start=None, end=None, by="mtime"):
-        """[(path, mtime, size, tags)] in roots with any (or all) of the folded tags, whose
+        """[(path, mtime, size, tags, taken)] in roots with any (or all) of the folded tags, whose
         date by ("mtime", modified, or "taken") is in [start, end)."""
         assert by in ("mtime", "taken")
         where, params = _under(roots)
-        query = f"SELECT path, mtime, size, tags FROM images WHERE ({where})"
+        query = f"SELECT path, mtime, size, tags, taken FROM images WHERE ({where})"
         if folded:
             matching, more = self._matching(folded, match_all, roots)
             query += f" AND path IN ({matching})"
@@ -1119,7 +1137,8 @@ class TagIndex:
         if end is not None:
             query += f" AND {by} < ?"
             params.append(end)
-        return [(path, mtime, size, json.loads(tags)) for path, mtime, size, tags in self.db.execute(query, params)]
+        return [(path, mtime, size, json.loads(tags), taken)
+                for path, mtime, size, tags, taken in self.db.execute(query, params)]
 
 
 def search_files(index, roots, search):
@@ -2062,7 +2081,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.search_source = 0
 
         self.folder = None
-        self.tag_filter = ""  # "" for all images, a tag, or UNTAGGED
+        self.tag_filter = ""  # "" for all files, a KIND_FILTERS value, a tag, or UNTAGGED
         self.tags_loading = False
         self.monitor = None
         self.rescan_source = 0
@@ -2142,7 +2161,7 @@ class ImageWindow(Adw.ApplicationWindow):
         images_header.append(Gtk.Label(label="Files", xalign=0, hexpand=True, css_classes=["heading"]))
         self.tag_menu = Gio.Menu()
         self.view_button = Gtk.MenuButton(label="All", menu_model=self.tag_menu, css_classes=["flat"],
-                                          always_show_arrow=True, tooltip_text="Show and Sort Images")
+                                          always_show_arrow=True, tooltip_text="Show and Sort Files")
         images_header.append(self.view_button)
         self.search_close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="End Search",
                                        css_classes=["flat"], visible=False)
@@ -2159,7 +2178,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.sidebar_title = Adw.WindowTitle(title=APP_NAME)
         sidebar_header = Adw.HeaderBar(title_widget=self.sidebar_title)
         open_button = Gtk.Button(icon_name="document-open-symbolic", action_name="win.open",
-                                 tooltip_text="Open Image… (Ctrl+O)")
+                                 tooltip_text="Open File… (Ctrl+O)")
         sidebar_header.pack_start(open_button)
         sidebar_header.pack_start(Gtk.Button(icon_name="view-pin-symbolic", action_name="win.manage-folders",
                                              tooltip_text="Manage Pinned Folders"))
@@ -2242,7 +2261,7 @@ class ImageWindow(Adw.ApplicationWindow):
 
         menu = Gio.Menu()
         section = Gio.Menu()
-        section.append("Open Image…", "win.open")
+        section.append("Open File…", "win.open")
         section.append("Open Folder…", "win.open-folder")
         menu.append_section(None, section)
         section = Gio.Menu()
@@ -2891,10 +2910,10 @@ class ImageWindow(Adw.ApplicationWindow):
             items = self._search_items()
             unknown = []
         else:
-            items = scan_folder(self.folder, self.settings["sort_by"], self.settings["show_hidden"])
+            items = scan_folder(self.folder, self.settings["show_hidden"])
             known = self.tag_index.lookup(items)
             for item in items:
-                item.tags = known.get(item.path)
+                item.tags, item.taken = known.get(item.path, (None, None))
             unknown = [item for item in items if item.tags is None]
         total = len(items)
         self.tags_loading = bool(unknown) and GExiv2 is not None
@@ -2905,8 +2924,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self._update_tag_menu(items)
         if self.tag_filter:
             items = [i for i in items if self._matches_filter(i)]
-        if self.settings["sort_by"] == "tag":
-            items = sort_by_tag(items)
+        items = sort_items(items, self.settings["sort_by"])
 
         self.updating = True
         try:
@@ -3010,14 +3028,10 @@ class ImageWindow(Adw.ApplicationWindow):
     def _search_items(self):
         rows = search_files(self.tag_index, Library.roots(self.settings["folders"]), self.search)
         items = []
-        for path, mtime, size, tags in rows:
+        for path, mtime, size, tags, taken in rows:
             item = ImageItem(path, mtime, size)
-            item.tags = tags
+            item.tags, item.taken = tags, taken
             items.append(item)
-        if self.settings["sort_by"] == "date":
-            items.sort(key=lambda i: (i.mtime, i.path))
-        else:
-            items.sort(key=lambda i: (GLib.utf8_collate_key_for_filename(i.display_name, -1), i.path))
         return items
 
     def _search_title(self):
@@ -3040,8 +3054,11 @@ class ImageWindow(Adw.ApplicationWindow):
         return False
 
     def _matches_filter(self, item):
+        for value, _, _, test in KIND_FILTERS:
+            if self.tag_filter == value:
+                return test(item.name)
         if self.tag_filter == UNTAGGED:
-            return not item.tags
+            return is_image(item.name) and not item.tags
         wanted = self.tag_filter.casefold()
         return any(t.casefold() == wanted for t in item.tags or [])
 
@@ -3051,30 +3068,38 @@ class ImageWindow(Adw.ApplicationWindow):
     def set_tag_filter(self, value, rescan=True):
         self.tag_filter = value
         self.lookup_action("tag-filter").set_state(GLib.Variant("s", value))
-        label = {"": "All", UNTAGGED: "Untagged"}.get(value, value)
+        labels = {"": "All", UNTAGGED: "Untagged", **{v: button for v, _, button, _ in KIND_FILTERS}}
+        label = labels.get(value, value)
         self.view_button.set_label(label)
-        self.view_button.set_tooltip_text("Show and Sort Images" if not value else f"Showing: {label}")
+        self.view_button.set_tooltip_text("Show and Sort Files" if not value else f"Showing: {label}")
         if rescan:
             self.rescan()
 
     def _update_tag_menu(self, items):
-        """Rebuild the Images menu: All, Untagged and each tag in this folder with its count, then Sort By."""
+        """Rebuild the Files menu: All and each kind of file, Untagged and each tag, with their counts,
+        then Sort By."""
         counts, names = {}, {}
         untagged = 0
         for item in items:
-            if not item.tags:
+            if not item.tags and is_image(item.name):
                 untagged += item.tags is not None
             for tag in {t.casefold(): t for t in item.tags or []}.items():
                 counts[tag[0]] = counts.get(tag[0], 0) + 1
                 names.setdefault(tag[0], tag[1])
         self.tag_menu.remove_all()
         show = Gio.Menu()
-        show.append(f"All Images ({len(items)})", "win.tag-filter::")
-        if counts and untagged:
-            show.append_item(self._menu_item(f"Untagged ({untagged})", "tag-filter", UNTAGGED))
-        for key in sorted(counts, key=lambda k: GLib.utf8_collate_key(k, -1)):
-            show.append_item(self._menu_item(f"{names[key]} ({counts[key]})", "tag-filter", names[key]))
+        show.append(f"All Files ({len(items)})", "win.tag-filter::")
+        for value, label, _, test in KIND_FILTERS:
+            if count := sum(test(item.name) for item in items):
+                show.append_item(self._menu_item(f"{label} ({count})", "tag-filter", value))
         self.tag_menu.append_section("Show", show)
+        if counts:
+            tags = Gio.Menu()
+            if untagged:
+                tags.append_item(self._menu_item(f"Untagged ({untagged})", "tag-filter", UNTAGGED))
+            for key in sorted(counts, key=lambda k: GLib.utf8_collate_key(k, -1)):
+                tags.append_item(self._menu_item(f"{names[key]} ({counts[key]})", "tag-filter", names[key]))
+            self.tag_menu.append_section("Tags", tags)
         sort = Gio.Menu()
         for key, label in SORT_OPTIONS:
             sort.append_item(self._menu_item(label, "sort-by", key))
