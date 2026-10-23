@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=Glimpse Image Viewer
+Name=Glimpse Media Viewer
 Comment=View and organise your images, videos and music
 Exec=@EXEC@ %U
 Icon=io.github.pst007xx.Glimpse

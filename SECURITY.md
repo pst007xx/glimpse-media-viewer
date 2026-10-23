@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Security fixes go into the latest release of Glimpse Image Viewer. Please update
+Security fixes go into the latest release of Glimpse Media Viewer. Please update
 to it before reporting, as the problem may already be fixed.
 
 | Version | Supported          |

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Salvatore Turone
-"""Glimpse Image Viewer — view and organise images, videos and music, built with GTK 4 and libadwaita."""
+"""Glimpse Media Viewer — view and organise images, videos and music, built with GTK 4 and libadwaita."""
 
 import datetime
 import filecmp
@@ -47,7 +47,7 @@ else:
 METADATA_LOCK = threading.Lock()
 
 APP_ID = "io.github.pst007xx.Glimpse"
-APP_NAME = "Glimpse Image Viewer"
+APP_NAME = "Glimpse Media Viewer"
 VERSION = "1.0.2"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
@@ -133,7 +133,7 @@ HELP = [
         ("Opening Files", [
             ("Open a file or folder",
              "Use the open button (Ctrl+O), Open Folder… in the main menu (Ctrl+Shift+O), drag a file "
-             "or folder onto the window, or choose Glimpse Image Viewer under Open With… in Files."),
+             "or folder onto the window, or choose Glimpse Media Viewer under Open With… in Files."),
             ("Browse the folder",
              "Every image, video and music file in the opened file's folder is listed in the sidebar. Use the "
              "arrow buttons, Left/Right, Page Up/Down or Space/Backspace to step through them, Home/End for "

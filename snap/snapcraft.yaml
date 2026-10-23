@@ -1,10 +1,10 @@
 name: glimpse-media-viewer
 base: core24
 version: '1.0.2'
-title: Glimpse Image Viewer
+title: Glimpse Media Viewer
 summary: View and organise your images, videos and music
 description: |
-  Glimpse Image Viewer is a fast, simple viewer and organiser for your photos, videos and music, made to fit right into GNOME. Open any file and everything in its folder is ready to browse in the sidebar, with thumbnails, tags and cover art.
+  Glimpse Media Viewer is a fast, simple viewer and organiser for your photos, videos and music, made to fit right into GNOME. Open any file and everything in its folder is ready to browse in the sidebar, with thumbnails, tags and cover art.
 
   VIEW
   - Thumbnails of every image and video, and cover art for songs
