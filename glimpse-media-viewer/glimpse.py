@@ -57,6 +57,8 @@ IN_SNAP = "SNAP" in os.environ
 THUMB_SIZE = 40
 SIDEBAR_MIN = 220
 CONTENT_MIN = 360     # the sidebar never widens past what leaves this much for the image
+PANE_MIN = 220        # the second folder pane, right of the image
+PREVIEW_HEIGHT = 150  # its preview of the selected file
 TREE_INDENT = 20      # a folder row's indent per level (measured with Adwaita)
 TREE_ROW_EXTRA = 76   # a folder row's arrow, icon, spacing and padding around the name (72 measured)
 ZOOM_STEP = 1.25
@@ -116,6 +118,9 @@ SHORTCUTS = [
         ("Move to pinned folder 1–9", "<Alt>1...<Alt>9"),
         ("Copy to pinned folder 1–9", "<Control><Alt>1...<Control><Alt>9"),
         ("Rename", "F2"),
+        ("Show or hide the second folder", "F3"),
+        ("Copy to the other folder", "F5"),
+        ("Move to the other folder", "F6"),
         ("Delete", "Delete"),
         ("Properties and tags", "<Alt>Return"),
         ("Search pinned folders", "<Control>f"),
@@ -194,6 +199,15 @@ HELP = [
              "create a new subfolder, or pin/unpin it."),
         ]),
         ("Moving and Copying", [
+            ("Two folders side by side",
+             "Press F3 or use the two-pane button at the top right to show a second folder on the right. "
+             "It has its own folder tree: choose any pinned folder or subfolder there, and the left side "
+             "stays where it is. Drag files from the left list onto the right one, or onto a folder in its "
+             "tree, to move them there. Drag them back onto the left list or the picture in the middle to "
+             "move them into the left side's folder; the left side stays where it is. Hold Ctrl while "
+             "dropping to copy instead. You can also select files and press F6 to move or F5 to copy them to the other side, "
+             "or use the arrow buttons at the bottom of the pane. Undo works as usual. Rename, Delete and "
+             "Properties act on the side you last clicked in."),
             ("Select several images", "Ctrl-click or Shift-click in the image list, or press Ctrl+A to select all."),
             ("Drag onto a folder",
              "Drag images from the list onto a folder to move them there. Hold Ctrl while dropping to copy."),
@@ -348,7 +362,12 @@ def file_types_page():
 
 
 CSS = """
-.folder-row:drop(active) {
+.second-pane {
+    background-color: @sidebar_bg_color;
+    color: @sidebar_fg_color;
+    border-left: 1px solid @sidebar_border_color;
+}
+.folder-row:drop(active), .pane-drop:drop(active) {
     background-color: alpha(@accent_bg_color, 0.3);
     border-radius: 6px;
 }
@@ -490,6 +509,17 @@ def load_thumbnail(path, size):
             return GdkPixbuf.Pixbuf.new_from_file_at_scale(thumb, size, size, True)
     except GLib.Error:
         pass
+    if is_video(path):
+        return video_frame(path, size)
+    if is_audio(path):
+        cover = song_info(path).get("cover")
+        return cover and scale_to_fit(cover, size)
+    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+    return pixbuf.apply_embedded_orientation() or pixbuf
+
+
+def load_preview(path, size):
+    """A picture of a file to fit size: the image itself, a video's frame or a song's cover, or None."""
     if is_video(path):
         return video_frame(path, size)
     if is_audio(path):
@@ -851,6 +881,9 @@ class Settings(GObject.Object):
         "last_folder": "",
         "folders": [],                  # folders pinned in the sidebar
         "sidebar_width": 280,           # as dragged; the sidebar widens beyond it to fit open folders
+        "pane_shown": False,            # the second folder pane, right of the image
+        "pane_folder": "",
+        "pane_width": 300,
     }
 
     def __init__(self):
@@ -925,6 +958,24 @@ UNTAGGED = "\x01untagged"  # tag-filter value for images without tags; can't be 
 # tag-filter values showing one kind of file: (value, menu label, button label, test)
 KIND_FILTERS = [("\x01image", "Only Images", "Images", is_image), ("\x01video", "Only Videos", "Videos", is_video),
                 ("\x01audio", "Only Music", "Music", is_audio)]
+
+
+def update_store(store, items):
+    """Make store hold items, replacing only the stretch that changed, so a list showing it keeps its
+    scroll position, focus and selection elsewhere instead of starting again from the top."""
+    old = [store.get_item(i) for i in range(store.get_n_items())]
+
+    def key(item):
+        return item.path, item.mtime, item.size, tuple(item.tags or ()), item.taken
+
+    start = 0
+    while start < min(len(old), len(items)) and key(old[start]) == key(items[start]):
+        start += 1
+    end = 0
+    while end < min(len(old), len(items)) - start and key(old[-1 - end]) == key(items[-1 - end]):
+        end += 1
+    if start + end < len(old) or start + end < len(items):
+        store.splice(start, len(old) - start - end, items[start:len(items) - end])
 
 
 def sort_items(items, sort_by):
@@ -2065,6 +2116,441 @@ class SearchDialog(Adw.PreferencesDialog):
         self.close()
 
 
+class FolderPane(Adw.Bin):
+    """A second folder, right of the image, chosen in its own folder tree, to move and copy files
+    between it and the image list. Choosing a folder here never changes the image list's folder."""
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.settings = window.settings
+        self.folder = None
+        self.monitor = None
+        self.rescan_source = 0
+        self.updating = False
+        self.tree_updating = False
+        self.leaving = None  # (paths, position) of files being moved out, to select the next one after
+
+        # Folders: the pinned folders, each expandable into its subfolders
+        self.roots = Gio.ListStore(item_type=FolderNode)
+        self.tree = Gtk.TreeListModel.new(self.roots, False, False, window._folder_children)
+        self.tree_selection = Gtk.SingleSelection(model=self.tree, autoselect=False, can_unselect=True)
+        self.tree_selection.connect("selection-changed", self._on_tree_selected)
+        tree_factory = Gtk.SignalListItemFactory()
+        tree_factory.connect("setup", self._tree_row_setup)
+        tree_factory.connect("bind", self._tree_row_bind)
+        tree_factory.connect("unbind", lambda f, list_item: setattr(list_item.get_child().get_child(), "node", None))
+        self.tree_view = Gtk.ListView(model=self.tree_selection, factory=tree_factory,
+                                      css_classes=["navigation-sidebar"])
+        self.tree_stack = Gtk.Stack(vexpand=True)
+        self.tree_stack.add_named(Gtk.ScrolledWindow(child=self.tree_view, hscrollbar_policy=Gtk.PolicyType.NEVER),
+                                  "list")
+        self.tree_stack.add_named(Gtk.Label(label="Pin folders in the sidebar to choose them here", wrap=True,
+                                            justify=Gtk.Justification.CENTER, valign=Gtk.Align.CENTER,
+                                            margin_start=18, margin_end=18, css_classes=["dim-label", "caption"]),
+                                  "empty")
+        folders_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=90)
+        folders_box.append(Gtk.Label(label="Folders", xalign=0, margin_start=12, margin_top=10, margin_bottom=4,
+                                     css_classes=["heading"]))
+        folders_box.append(self.tree_stack)
+
+        # Files in the chosen folder
+        self.store = Gio.ListStore(item_type=ImageItem)
+        self.selection = Gtk.MultiSelection(model=self.store)
+        self.selection.connect("selection-changed", self._on_selection_changed)
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._row_setup)
+        factory.connect("bind", self._row_bind)
+        factory.connect("unbind", lambda f, list_item: setattr(list_item.get_child(), "item", None))
+        self.listview = Gtk.ListView(model=self.selection, factory=factory, css_classes=["navigation-sidebar"])
+        focus = Gtk.EventControllerFocus()
+        focus.connect("enter", lambda *_: window.set_pane_active(True))
+        self.listview.add_controller(focus)
+        scroller = Gtk.ScrolledWindow(child=self.listview, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.empty = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, valign=Gtk.Align.CENTER, vexpand=True,
+                               margin_start=18, margin_end=18, css_classes=["dim-label", "caption"])
+        self.stack = Gtk.Stack(vexpand=True, css_classes=["pane-drop"])
+        self.stack.add_named(scroller, "list")
+        self.stack.add_named(self.empty, "empty")
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+        drop.connect("enter", lambda t, x, y: window._drop_action(t))
+        drop.connect("motion", lambda t, x, y: window._drop_action(t))
+        drop.connect("drop", lambda t, value, x, y: self._on_drop(t, value, self.shown_folder()))
+        self.stack.add_controller(drop)
+        files_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=120)
+        self.files_label = Gtk.Label(label="Files", xalign=0, margin_start=12, margin_top=10, margin_bottom=4,
+                                     ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["heading"])
+        files_box.append(self.files_label)
+        files_box.append(self.stack)
+
+        # A small preview of the file selected here
+        self.preview_generation = 0
+        self.preview_picture = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, vexpand=True)
+        self.preview_icon = Gtk.Image(pixel_size=48, vexpand=True, css_classes=["dim-label"])
+        self.preview_stack = Gtk.Stack(height_request=PREVIEW_HEIGHT)
+        self.preview_stack.add_named(self.preview_picture, "picture")
+        self.preview_stack.add_named(self.preview_icon, "icon")
+        self.preview_caption = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["dim-label", "caption"])
+        preview = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=12, margin_end=12,
+                          margin_top=8, margin_bottom=8)
+        preview.append(self.preview_stack)
+        preview.append(self.preview_caption)
+        files_box.append(Gtk.Separator())
+        files_box.append(preview)
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, start_child=folders_box, end_child=files_box,
+                          position=230, shrink_start_child=False, shrink_end_child=False)
+        self.title = Adw.WindowTitle(title="Second Folder")
+        self.header = Adw.HeaderBar(title_widget=self.title, show_start_title_buttons=False)
+        bar = Gtk.ActionBar()
+        back, into = Gtk.Box(css_classes=["linked"]), Gtk.Box(css_classes=["linked"])
+        for box, entries in ((back, (("← Move", "win.pane-move-out", "Move the Files Selected Here to the Left (F6)"),
+                                     ("← Copy", "win.pane-copy-out", "Copy the Files Selected Here to the Left (F5)"))),
+                             (into, (("Move →", "win.pane-move-in", "Move the Files Selected on the Left Here (F6)"),
+                                     ("Copy →", "win.pane-copy-in", "Copy the Files Selected on the Left Here (F5)")))):
+            for label, action, tip in entries:
+                box.append(Gtk.Button(label=label, action_name=action, tooltip_text=tip))
+        bar.pack_start(back)
+        bar.pack_end(into)
+        view = Adw.ToolbarView(content=paned)
+        view.add_top_bar(self.header)
+        view.add_bottom_bar(bar)
+
+        # A handle on the pane's left edge: drag it to resize the pane
+        handle = Gtk.Box(width_request=8, halign=Gtk.Align.START, cursor=Gdk.Cursor.new_from_name("col-resize"))
+        resize = Gtk.GestureDrag()
+        resize.connect("drag-begin", lambda g, x, y: setattr(self, "resize_start", self.width))
+        resize.connect("drag-update", self._on_resize)
+        resize.connect("drag-end", lambda *_: self.settings.__setitem__("pane_width", self.width))
+        handle.add_controller(resize)
+        overlay = Gtk.Overlay(child=view)
+        overlay.add_overlay(handle)
+        self.set_child(overlay)
+        self.add_css_class("second-pane")
+        self.width = self.settings["pane_width"]
+        self.set_size_request(self.width, -1)
+
+        folder = self.settings["pane_folder"]
+        self.folder = folder if folder and os.path.isdir(folder) else None
+        self.rebuild_tree()
+        if self.folder:
+            self.open(self.folder)
+        else:
+            self.rescan()
+
+    # Size
+
+    def _on_resize(self, gesture, dx, dy):
+        window = self.window
+        room = (window.get_width() or 0) - CONTENT_MIN - (window.split.get_max_sidebar_width()
+                                                          if window.split.get_show_sidebar() else 0)
+        self.width = max(PANE_MIN, min(round(self.resize_start - dx), max(PANE_MIN, room)))
+        self.set_size_request(self.width, -1)
+
+    # Folder tree
+
+    def _tree_row_setup(self, factory, list_item):
+        expander = Gtk.TreeExpander(css_classes=["folder-row"])
+        box = Gtk.Box(spacing=8)
+        box.icon = Gtk.Image(icon_name="folder-symbolic")
+        box.label = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        box.node = None
+        box.append(box.icon)
+        box.append(box.label)
+        expander.set_child(box)
+        # Dropping onto a folder moves the files into it
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+        drop.connect("enter", lambda t, x, y: self.window._drop_action(t))
+        drop.connect("motion", lambda t, x, y: self.window._drop_action(t))
+        drop.connect("drop", lambda t, value, x, y: box.node is not None and self._on_drop(t, value, box.node.path))
+        expander.add_controller(drop)
+        list_item.set_child(expander)
+
+    def _tree_row_bind(self, factory, list_item):
+        row = list_item.get_item()
+        node = row.get_item()
+        expander = list_item.get_child()
+        expander.set_list_row(row)
+        box = expander.get_child()
+        box.node = node
+        box.label.set_label(node.name)
+        box.label.set_attributes(_BOLD if node.is_root else None)
+        exists = os.path.isdir(node.path)
+        box.icon.set_from_icon_name("folder-symbolic" if exists else "dialog-warning-symbolic")
+        box.set_tooltip_text(GLib.filename_display_name(node.path) + ("" if exists else "\nFolder not found"))
+
+    def rebuild_tree(self):
+        """Reload the pinned folders, keeping expanded folders expanded and the chosen one shown."""
+        expanded = set()
+        for i in range(self.tree.get_n_items()):
+            row = self.tree.get_item(i)
+            if row.get_expanded():
+                expanded.add(row.get_item().path)
+        self.tree_updating = True
+        try:
+            self.roots.splice(0, self.roots.get_n_items(),
+                              [FolderNode(p, is_root=True) for p in self.settings["folders"]])
+            self._expand(lambda path: path in expanded)
+        finally:
+            self.tree_updating = False
+        self.tree_stack.set_visible_child_name("list" if self.settings["folders"] else "empty")
+        self._sync_tree()
+
+    def _expand(self, wanted):
+        i = 0
+        while i < self.tree.get_n_items():  # expanding inserts rows, so loop by index
+            row = self.tree.get_item(i)
+            if wanted(row.get_item().path):
+                row.set_expanded(True)
+            i += 1
+
+    def _sync_tree(self):
+        """Select the chosen folder in the tree, opening the folders above it so it shows."""
+        folder = self.folder
+        self.tree_updating = True
+        try:
+            if folder:
+                self._expand(lambda path: folder.startswith(path.rstrip("/") + "/"))
+            for i in range(self.tree.get_n_items()):
+                if self.tree.get_item(i).get_item().path == folder:
+                    self.tree_selection.set_selected(i)
+                    self.tree_view.scroll_to(i, Gtk.ListScrollFlags.NONE, None)
+                    break
+            else:
+                self.tree_selection.set_selected(Gtk.INVALID_LIST_POSITION)
+        finally:
+            self.tree_updating = False
+
+    def _on_tree_selected(self, selection, position, n_items):
+        if self.tree_updating:
+            return
+        row = selection.get_selected_item()
+        if row is not None and row.get_item().path != self.folder:
+            self.open(row.get_item().path)
+
+    # The chosen folder
+
+    def shown_folder(self):
+        return self.folder if self.folder and os.path.isdir(self.folder) else None
+
+    def open(self, folder):
+        if not os.path.isdir(folder):
+            self.window.toast(f"“{GLib.filename_display_name(folder)}” no longer exists")
+            self._sync_tree()
+            return
+        self.folder = folder
+        self.settings["pane_folder"] = folder
+        if self.monitor:
+            self.monitor.cancel()
+        try:
+            self.monitor = Gio.File.new_for_path(folder).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+            self.monitor.connect("changed", self._on_folder_changed)
+        except GLib.Error:
+            self.monitor = None
+        self._sync_tree()
+        self.selection.unselect_all()
+        self.rescan()
+
+    def _on_folder_changed(self, *_):
+        if self.rescan_source:
+            GLib.source_remove(self.rescan_source)
+        self.rescan_source = GLib.timeout_add(300, self._rescan_later)
+
+    def _rescan_later(self):
+        self.rescan_source = 0
+        self.rescan()
+        return False
+
+    def rescan(self):
+        folder = self.shown_folder()
+        if folder is None:
+            self.updating = True
+            try:
+                self.store.remove_all()
+            finally:
+                self.updating = False
+            self.title.set_title("Second Folder")
+            self.title.set_subtitle("")
+            self.files_label.set_label("Files")
+            self.empty.set_label("Choose a folder above, then drag files here to move them into it"
+                                 if self.settings["folders"] else "")
+            self.stack.set_visible_child_name("empty")
+            self._done()
+            return
+        keep = set(self.selected_paths())
+        first = next((i for i in range(self.store.get_n_items()) if self.selection.is_selected(i)), None)
+        items = scan_folder(folder, self.settings["show_hidden"])
+        known = self.window.tag_index.lookup(items)
+        for item in items:
+            item.tags, item.taken = known.get(item.path, (None, None))
+        items = sort_items(items, self.settings["sort_by"])
+        self.updating = True
+        try:
+            update_store(self.store, items)
+            items = [self.store.get_item(i) for i in range(self.store.get_n_items())]
+            kept = [i for i, item in enumerate(items) if item.path in keep]
+            for i in kept:
+                self.selection.select_item(i, False)
+            gone = self.leaving is not None and not any(item.path in self.leaving[0] for item in items)
+            if gone:  # files moved out from here: what they were is known even if the selection got lost
+                keep, first = self.leaving[0], self.leaving[1]
+                self.leaving = None
+            if keep and not kept and items and first is not None:
+                # The selected files moved away: select the one that took their place, the next in the list
+                first = min(first, len(items) - 1)
+                self.selection.select_item(first, True)
+                GLib.idle_add(self._scroll_to, first)  # once the new list is laid out
+        finally:
+            self.updating = False
+        name = GLib.filename_display_basename(folder)
+        self.title.set_title(name)
+        self.title.set_subtitle(plural(len(items), "file"))
+        self.title.set_tooltip_text(GLib.filename_display_name(folder))
+        self.files_label.set_label(f"Files in {name}")
+        self.empty.set_label("No images, videos or music here. Drag files here to move them in")
+        self.stack.set_visible_child_name("list" if items else "empty")
+        self._done()
+
+    def _scroll_to(self, position):
+        if position < self.store.get_n_items():
+            self.listview.scroll_to(position, Gtk.ListScrollFlags.FOCUS, None)
+        return False
+
+    def note_leaving(self, paths):
+        """Files from this folder are about to move away: afterwards, select the one after them."""
+        folder = self.shown_folder()
+        mine = {p for p in paths if folder and os.path.dirname(p) == folder}
+        positions = [i for i in range(self.store.get_n_items()) if self.store.get_item(i).path in mine]
+        self.leaving = (mine, min(positions)) if positions else None
+
+    def _done(self):
+        self._update_preview()
+        if hasattr(self.window, "actions"):  # not while the window is still being built
+            self.window.update_actions()
+
+    # Files
+
+    def selected_paths(self):
+        return [self.store.get_item(i).path for i in range(self.store.get_n_items()) if self.selection.is_selected(i)]
+
+    def _on_selection_changed(self, *_):
+        if not self.updating:
+            self.window.set_pane_active(True)
+            self.window.update_actions()
+            self._update_preview()
+
+    def _update_preview(self):
+        """Show the selected file, or say how many are selected."""
+        self.preview_generation += 1
+        generation = self.preview_generation
+        selected = [self.store.get_item(i) for i in range(self.store.get_n_items()) if self.selection.is_selected(i)]
+        if len(selected) != 1:
+            self.preview_picture.set_paintable(None)
+            self.preview_icon.set_from_icon_name("view-paged-symbolic" if selected else "image-x-generic-symbolic")
+            self.preview_stack.set_visible_child_name("icon")
+            self.preview_caption.set_label(f"{len(selected)} files selected" if selected
+                                           else "Select a file to preview it" if self.store.get_n_items() else "")
+            return
+        item = selected[0]
+        icon = ("video-x-generic-symbolic" if is_video(item.path) else "audio-x-generic-symbolic"
+                if is_audio(item.path) else "image-x-generic-symbolic")
+        self.preview_caption.set_label(f"{item.display_name} · {GLib.format_size(item.size)}")
+        self.preview_icon.set_from_icon_name(icon)
+        self.preview_stack.set_visible_child_name("icon")  # until the picture is ready
+        size = PREVIEW_HEIGHT * max(1, self.get_scale_factor()) * 2  # sharp on HiDPI, and room to fit wide images
+
+        def done(pixbuf, error):
+            if generation != self.preview_generation:
+                return  # another file was selected meanwhile
+            if pixbuf is None or error is not None:
+                return  # keep the file type's icon
+            self.preview_picture.set_paintable(Gdk.Texture.new_for_pixbuf(pixbuf))
+            self.preview_stack.set_visible_child_name("picture")
+            if not is_video(item.path) and not is_audio(item.path):
+                width, height = GdkPixbuf.Pixbuf.get_file_info(item.path)[1:]
+                if width:
+                    self.preview_caption.set_label(f"{item.display_name} · {width} × {height} · "
+                                                   f"{GLib.format_size(item.size)}")
+
+        run_in_thread(lambda: load_preview(item.path, size), done)
+
+    def _row_setup(self, factory, list_item):
+        box = Gtk.Box(spacing=10)
+        box.thumb = Gtk.Image(pixel_size=THUMB_SIZE)
+        box.label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        box.tags = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["dim-label", "caption"])
+        box.item = None
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        text.append(box.label)
+        text.append(box.tags)
+        box.append(box.thumb)
+        box.append(text)
+        drag = Gtk.DragSource(actions=Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+        drag.connect("prepare", self._on_drag_prepare, list_item)
+        drag.connect("drag-begin", self._on_drag_begin, box)
+        drag.connect("drag-end", lambda *_: setattr(self.window, "pane_drag", False))
+        box.add_controller(drag)
+        list_item.set_child(box)
+
+    def _on_drag_prepare(self, source, x, y, list_item):
+        pos = list_item.get_position()
+        if not self.selection.is_selected(pos):
+            self.selection.select_item(pos, True)
+        files = [Gio.File.new_for_path(p) for p in self.selected_paths()]
+        return Gdk.ContentProvider.new_for_value(GObject.Value(Gdk.FileList, Gdk.FileList.new_from_list(files)))
+
+    def _on_drag_begin(self, source, drag, box):
+        self.window.pane_drag = True
+        source.set_icon(Gtk.WidgetPaintable(widget=box), 0, 0)
+
+    def _row_bind(self, factory, list_item):
+        box = list_item.get_child()
+        item = box.item = list_item.get_item()
+        box.label.set_label(item.display_name)
+        caption = ", ".join(item.tags or [])
+        box.tags.set_label(caption)
+        box.tags.set_visible(bool(caption))
+        box.set_tooltip_text(item.display_name + (f"\n{caption}" if caption else ""))
+        show = self.settings["show_thumbnails"]
+        box.thumb.set_visible(show)
+        if not show:
+            return
+
+        def ready(texture):
+            if box.item is item:
+                box.thumb.set_from_paintable(texture)
+
+        texture = self.window.thumbs.get(item, ready)
+        if texture:
+            box.thumb.set_from_paintable(texture)
+        else:
+            box.thumb.set_from_icon_name("video-x-generic-symbolic" if is_video(item.path)
+                                         else "audio-x-generic-symbolic" if is_audio(item.path)
+                                         else "image-x-generic-symbolic")
+
+    # Moving
+
+    def _on_drop(self, target, value, dest):
+        if not dest:
+            return False
+        paths = [f.get_path() for f in value.get_files() if f.get_path()]
+        files = [p for p in paths if os.path.isfile(p) and is_media(os.path.basename(p))]
+        real = os.path.realpath(dest)
+        if not files or all(os.path.realpath(os.path.dirname(p)) == real for p in files):
+            return False  # nothing to do, such as files dropped back where they came from
+        move = self.window._drop_action(target) == Gdk.DragAction.MOVE
+        if move:
+            self.note_leaving(files)
+        self.window._transfer(files, dest, move)
+        return True
+
+    def close(self):
+        if self.monitor:
+            self.monitor.cancel()
+        if self.rescan_source:
+            GLib.source_remove(self.rescan_source)
+
+
 # ----------------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------------
@@ -2092,6 +2578,9 @@ class ImageWindow(Adw.ApplicationWindow):
         self.updating = False
         self.pointer = None
         self.sidebar_before_fullscreen = True
+        self.pane_before_fullscreen = False
+        self.pane_active = False  # whether file operations apply to the second folder's selection
+        self.pane_drag = False  # while files are dragged from the second folder
 
         self._build_ui()
         self._install_actions()
@@ -2170,6 +2659,18 @@ class ImageWindow(Adw.ApplicationWindow):
         images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=120)
         images_box.append(images_header)
         images_box.append(list_scroller)
+        focus = Gtk.EventControllerFocus()
+        focus.connect("enter", lambda *_: self.set_pane_active(False))
+        self.listview.add_controller(focus)
+        # Files dragged here from the second folder move into this one
+        list_drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+        list_drop.connect("accept", lambda t, d: self.pane_drag and self.folder is not None)
+        list_drop.connect("enter", lambda t, x, y: self._drop_action(t))
+        list_drop.connect("motion", lambda t, x, y: self._drop_action(t))
+        list_drop.connect("drop", lambda t, value, x, y: self.pane.shown_folder() is not None
+                          and self.pane._on_drop(t, value, self.folder))
+        list_scroller.add_css_class("pane-drop")
+        list_scroller.add_controller(list_drop)
 
         sidebar_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, start_child=folders_box,
                                   end_child=images_box, position=230,
@@ -2287,7 +2788,9 @@ class ImageWindow(Adw.ApplicationWindow):
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
                                        tooltip_text="Main Menu"))
-        header.pack_end(Gtk.Button(icon_name="document-properties-symbolic", action_name="win.properties",
+        header.pack_end(Gtk.ToggleButton(icon_name="sidebar-show-right-symbolic", action_name="win.toggle-pane",
+                                         tooltip_text="Show a Second Folder (F3)"))
+        header.pack_end(Gtk.Button(icon_name="help-about-symbolic", action_name="win.properties",
                                    tooltip_text="Properties (Alt+Enter)"))
 
         zoom = Gtk.Box(css_classes=["linked"])
@@ -2300,12 +2803,18 @@ class ImageWindow(Adw.ApplicationWindow):
                                tooltip_text="Zoom In (+)"))
         header.pack_end(zoom)
 
-        self.content = Adw.ToolbarView(content=self.stack)
+        self.content = Adw.ToolbarView(content=self.stack, hexpand=True)
         self.content.add_top_bar(header)
+        self.content_header = header
+        self.pane = FolderPane(self)
+        self.pane.set_visible(False)
+        main = Gtk.Box()
+        main.append(self.content)
+        main.append(self.pane)
 
         # The sidebar's width is set exactly (min = max), from the dragged width and the open folders
         self.sidebar_width = self.settings["sidebar_width"]
-        self.split = Adw.OverlaySplitView(sidebar=sidebar, content=self.content, sidebar_width_fraction=1)
+        self.split = Adw.OverlaySplitView(sidebar=sidebar, content=main, sidebar_width_fraction=1)
         self.fit_source = None
         self.folder_tree.connect("items-changed", lambda *_: self._queue_fit_sidebar())
         for signal in ("map", "notify::default-width", "notify::maximized", "notify::fullscreened"):
@@ -2354,8 +2863,9 @@ class ImageWindow(Adw.ApplicationWindow):
         self._fit_sidebar()
 
     def _sidebar_limit(self):
-        """Widest the sidebar may get, leaving room for the image."""
-        return max(SIDEBAR_MIN, (self.get_width() or self.get_default_size()[0]) - CONTENT_MIN)
+        """Widest the sidebar may get, leaving room for the image (and the second folder)."""
+        pane = self.pane.width if self.pane.get_visible() else 0
+        return max(SIDEBAR_MIN, (self.get_width() or self.get_default_size()[0]) - CONTENT_MIN - pane)
 
     def _queue_fit_sidebar(self):
         # Expanding a folder changes the tree several times in a row: fit once afterwards
@@ -2662,6 +3172,12 @@ class ImageWindow(Adw.ApplicationWindow):
             "add-folder": self.on_add_folder,
             "manage-folders": lambda *_: PinnedFoldersDialog(self.settings).present(self),
             "pin-current": lambda *_: self.pin_folders([self.folder]) or self.toast("Folder is already pinned"),
+            "pane-move": lambda *_: self.pane_transfer(self.pane_active, True),
+            "pane-copy": lambda *_: self.pane_transfer(self.pane_active, False),
+            "pane-move-in": lambda *_: self.pane_transfer(False, True),
+            "pane-copy-in": lambda *_: self.pane_transfer(False, False),
+            "pane-move-out": lambda *_: self.pane_transfer(True, True),
+            "pane-copy-out": lambda *_: self.pane_transfer(True, False),
         }
         # Actions with a string parameter: a folder path, or for wallpaper a style
         folder_actions = {
@@ -2690,6 +3206,11 @@ class ImageWindow(Adw.ApplicationWindow):
                                                 GLib.Variant("s", self.settings["sort_by"]))
         sort_by.connect("change-state", lambda a, value: self.settings.__setitem__("sort_by", value.get_string()))
         self.add_action(sort_by)
+        pane = Gio.SimpleAction.new_stateful("toggle-pane", None, GLib.Variant("b", False))
+        pane.connect("change-state", lambda a, value: self.show_pane(value.get_boolean()))
+        self.add_action(pane)
+        if self.settings["pane_shown"]:
+            self.show_pane(True)
 
     def _install_input(self):
         # Plain keys are handled here, in the capture phase, so they work whatever
@@ -2737,7 +3258,10 @@ class ImageWindow(Adw.ApplicationWindow):
             widget.add_controller(context)
 
         # Drag and drop files from Files
-        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        # (files dragged from the second folder move into the image list's folder instead)
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+        drop.connect("enter", lambda t, x, y: self._drop_action(t) if self.pane_drag else Gdk.DragAction.COPY)
+        drop.connect("motion", lambda t, x, y: self._drop_action(t) if self.pane_drag else Gdk.DragAction.COPY)
         drop.connect("drop", self._on_drop)
         self.content.add_controller(drop)
 
@@ -2746,7 +3270,7 @@ class ImageWindow(Adw.ApplicationWindow):
             return False
         mods = state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.ALT_MASK)
         if mods == Gdk.ModifierType.CONTROL_MASK and keyval in (Gdk.KEY_a, Gdk.KEY_A):
-            self.selection.select_all()
+            (self.pane.selection if self.pane_active and self.pane.get_visible() else self.selection).select_all()
             return True
         # Alt+1…9 moves the selection to a pinned folder, Ctrl+Alt+1…9 copies it
         if mods & Gdk.ModifierType.ALT_MASK and Gdk.KEY_1 <= keyval <= Gdk.KEY_9:
@@ -2812,6 +3336,11 @@ class ImageWindow(Adw.ApplicationWindow):
             self.toggle_fit((x, y))
 
     def _on_drop(self, target, value, x, y):
+        if self.pane_drag:
+            if self.folder is None:
+                self.toast("Choose a folder on the left first, then drop files here to move them into it")
+                return False
+            return self.pane._on_drop(target, value, self.folder)
         files = value.get_files()
         if files and files[0].get_path():
             self.open_path(files[0].get_path())
@@ -3112,6 +3641,41 @@ class ImageWindow(Adw.ApplicationWindow):
         item.set_action_and_target_value(f"win.{action}", GLib.Variant("s", value))
         return item
 
+    # ------------------------------------------------------ second folder ---
+
+    def show_pane(self, shown):
+        self.lookup_action("toggle-pane").set_state(GLib.Variant("b", shown))
+        self.settings["pane_shown"] = shown
+        self.pane.set_visible(shown)
+        # The window's buttons go on whichever header is rightmost
+        self.content_header.set_show_end_title_buttons(not shown)
+        if shown:
+            self.pane.rebuild_tree()
+            self.pane.rescan()
+        else:
+            self.set_pane_active(False)
+        self._fit_sidebar()
+        self.update_actions()
+
+    def set_pane_active(self, active):
+        if self.pane_active != active:
+            self.pane_active = active
+            self.update_actions()
+
+    def _pane_dest(self, from_pane):
+        """Where files go from one side to the other, or None if that side has no folder."""
+        if not self.pane.get_visible():
+            return None
+        return self.folder if from_pane else self.pane.shown_folder()
+
+    def pane_transfer(self, from_pane, move):
+        dest = self._pane_dest(from_pane)
+        paths = self.pane.selected_paths() if from_pane else self._main_targets()
+        if dest and paths:
+            if move:
+                self.pane.note_leaving(paths)
+            self._transfer(paths, dest, move)
+
     # ---------------------------------------------------------- selection ---
 
     def selected_paths(self):
@@ -3119,7 +3683,13 @@ class ImageWindow(Adw.ApplicationWindow):
                 if self.selection.is_selected(i)]
 
     def targets(self):
-        """Images a file operation applies to: the selection, else the shown image."""
+        """Files an operation applies to: those selected in the second folder if it was used last,
+        else the image list's selection, else the shown file."""
+        if self.pane_active and self.pane.get_visible():
+            return self.pane.selected_paths()
+        return self._main_targets()
+
+    def _main_targets(self):
         selected = self.selected_paths()
         if selected:
             return selected
@@ -3128,6 +3698,7 @@ class ImageWindow(Adw.ApplicationWindow):
     def _on_selection_changed(self, selection, position, n_items):
         if self.updating:
             return
+        self.pane_active = False
         selected = self.selected_paths()
         if len(selected) == 1:
             self.display(selected[0])
@@ -3299,10 +3870,16 @@ class ImageWindow(Adw.ApplicationWindow):
             "move-here": bool(targets),
             "copy-here": bool(targets),
             "pin-current": self.folder is not None,
+            "pane-move": bool(targets) and self._pane_dest(self.pane_active) is not None,
+            "pane-copy": bool(targets) and self._pane_dest(self.pane_active) is not None,
+            "pane-move-in": bool(self._main_targets()) and self._pane_dest(False) is not None,
+            "pane-copy-in": bool(self._main_targets()) and self._pane_dest(False) is not None,
+            "pane-move-out": bool(self.pane.selected_paths()) and self._pane_dest(True) is not None,
+            "pane-copy-out": bool(self.pane.selected_paths()) and self._pane_dest(True) is not None,
         }
         for name, value in enabled.items():
             self.actions[name].set_enabled(value)
-        self.selection_label.set_label(f"{selected} selected" if selected > 1 else "")
+        self.selection_label.set_label(f"{selected} selected" if selected > 1 and not self.pane_active else "")
 
     # --------------------------------------------------------------- zoom ---
 
@@ -3488,6 +4065,8 @@ class ImageWindow(Adw.ApplicationWindow):
             if move:
                 self.tag_index.move(moved)
                 self.rescan()
+            if self.pane.get_visible():
+                self.pane.rescan()
 
         run_in_thread(work, finished)
 
@@ -3667,8 +4246,11 @@ class ImageWindow(Adw.ApplicationWindow):
             self.lookup_action("sort-by").set_state(GLib.Variant("s", settings["sort_by"]))
         if key in ("sort_by", "show_hidden", "show_thumbnails"):
             self.rescan()
+            self.pane.rescan()
         if key in ("folders", "show_hidden"):
             self.rebuild_folders()
+        if key in ("folders", "show_hidden"):
+            self.pane.rebuild_tree()
 
     def _on_fullscreen_changed(self, *_):
         fullscreen = self.is_fullscreen()
@@ -3676,13 +4258,17 @@ class ImageWindow(Adw.ApplicationWindow):
         if fullscreen:
             self.sidebar_before_fullscreen = self.split.get_show_sidebar()
             self.split.set_show_sidebar(False)
+            self.pane_before_fullscreen = self.pane.get_visible()
+            self.pane.set_visible(False)
         else:
             self.split.set_show_sidebar(self.sidebar_before_fullscreen)
+            self.pane.set_visible(self.pane_before_fullscreen)
 
     def _on_close(self, *_):
         self.stop_media()
         if self.monitor:
             self.monitor.cancel()
+        self.pane.close()
         self.settings.disconnect(self.settings_handler)
         self.library.listeners.remove(self._on_library_changed)
         if self.search_source:
@@ -3743,6 +4329,9 @@ class Application(Adw.Application):
             "win.copy-to": ["<Control><Shift>c"],
             "win.move-to": ["<Control><Shift>m"],
             "win.rename": ["F2"],
+            "win.toggle-pane": ["F3"],
+            "win.pane-copy": ["F5"],
+            "win.pane-move": ["F6"],
             "win.properties": ["<Alt>Return", "<Alt>KP_Enter"],
             "win.search": ["<Control>f"],
             "win.toggle-sidebar": ["F9"],
