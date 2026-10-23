@@ -57,7 +57,7 @@ IN_SNAP = "SNAP" in os.environ
 THUMB_SIZE = 40
 SIDEBAR_MIN = 220
 CONTENT_MIN = 360     # the sidebar never widens past what leaves this much for the image
-PANE_MIN = 220        # the second folder pane, right of the image
+PANE_MIN = 330        # the second folder pane, right of the image: room for its Move, Copy and Delete buttons
 PREVIEW_HEIGHT = 150  # its preview of the selected file
 TREE_INDENT = 20      # a folder row's indent per level (measured with Adwaita)
 TREE_ROW_EXTRA = 76   # a folder row's arrow, icon, spacing and padding around the name (72 measured)
@@ -209,7 +209,8 @@ HELP = [
              "left side's folder. Hold Ctrl while dropping to copy instead. You can also select files and "
              "press F6 to move or F5 to copy them to the other side, or use the arrow buttons at the bottom "
              "of the pane. After a move the next file is selected, ready for the next one, and Undo works as "
-             "usual. Rename, Delete and Properties act on the side you last clicked in."),
+             "usual. The bin button between them deletes the files selected in the pane. Rename, Delete "
+             "and Properties act on the side you last clicked in."),
             ("Select several images", "Ctrl-click or Shift-click in the image list, or press Ctrl+A to select all."),
             ("Drag onto a folder",
              "Drag images from the list onto a folder to move them there. Hold Ctrl while dropping to copy."),
@@ -368,6 +369,10 @@ CSS = """
     background-color: @sidebar_bg_color;
     color: @sidebar_fg_color;
     border-left: 1px solid @sidebar_border_color;
+}
+.pane-bar button {
+    padding-left: 7px;
+    padding-right: 7px;
 }
 .folder-row:drop(active), .pane-drop:drop(active) {
     background-color: alpha(@accent_bg_color, 0.3);
@@ -885,7 +890,7 @@ class Settings(GObject.Object):
         "sidebar_width": 280,           # as dragged; the sidebar widens beyond it to fit open folders
         "pane_shown": False,            # the second folder pane, right of the image
         "pane_folder": "",
-        "pane_width": 300,
+        "pane_width": 330,
     }
 
     def __init__(self):
@@ -2204,7 +2209,7 @@ class FolderPane(Adw.Bin):
                           position=230, shrink_start_child=False, shrink_end_child=False)
         self.title = Adw.WindowTitle(title="Second Folder")
         self.header = Adw.HeaderBar(title_widget=self.title, show_start_title_buttons=False)
-        bar = Gtk.ActionBar()
+        bar = self.bar = Gtk.ActionBar(css_classes=["pane-bar"])
         back, into = Gtk.Box(css_classes=["linked"]), Gtk.Box(css_classes=["linked"])
         for box, entries in ((back, (("← Move", "win.pane-move-out", "Move the Files Selected Here to the Left (F6)"),
                                      ("← Copy", "win.pane-copy-out", "Copy the Files Selected Here to the Left (F5)"))),
@@ -2213,6 +2218,8 @@ class FolderPane(Adw.Bin):
             for label, action, tip in entries:
                 box.append(Gtk.Button(label=label, action_name=action, tooltip_text=tip))
         bar.pack_start(back)
+        bar.set_center_widget(Gtk.Button(icon_name="user-trash-symbolic", action_name="win.pane-delete",
+                                         tooltip_text="Delete the Files Selected Here"))
         bar.pack_end(into)
         view = Adw.ToolbarView(content=paned)
         view.add_top_bar(self.header)
@@ -2229,7 +2236,7 @@ class FolderPane(Adw.Bin):
         overlay.add_overlay(handle)
         self.set_child(overlay)
         self.add_css_class("second-pane")
-        self.width = self.settings["pane_width"]
+        self.width = max(PANE_MIN, self.settings["pane_width"])
         self.set_size_request(self.width, -1)
 
         folder = self.settings["pane_folder"]
@@ -3180,6 +3187,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "pane-copy-in": lambda *_: self.pane_transfer(False, False),
             "pane-move-out": lambda *_: self.pane_transfer(True, True),
             "pane-copy-out": lambda *_: self.pane_transfer(True, False),
+            "pane-delete": lambda *_: self.on_delete(paths=self.pane.selected_paths()),
         }
         # Actions with a string parameter: a folder path, or for wallpaper a style
         folder_actions = {
@@ -3878,6 +3886,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "pane-copy-in": bool(self._main_targets()) and self._pane_dest(False) is not None,
             "pane-move-out": bool(self.pane.selected_paths()) and self._pane_dest(True) is not None,
             "pane-copy-out": bool(self.pane.selected_paths()) and self._pane_dest(True) is not None,
+            "pane-delete": bool(self.pane.selected_paths()),
         }
         for name, value in enabled.items():
             self.actions[name].set_enabled(value)
@@ -4172,8 +4181,8 @@ class ImageWindow(Adw.ApplicationWindow):
 
         GLib.idle_add(select_stem)
 
-    def on_delete(self, *_):
-        paths = self.targets()
+    def on_delete(self, *_, paths=None):
+        paths = self.targets() if paths is None else paths
         if not paths:
             return
         use_trash = self.settings["use_trash"]
@@ -4198,6 +4207,8 @@ class ImageWindow(Adw.ApplicationWindow):
             self._delete(paths, use_trash)
 
     def _delete(self, paths, use_trash):
+        self.pane.note_leaving(paths)
+
         def work():
             errors = []  # (message, trash not supported)
             gone = []
@@ -4238,6 +4249,8 @@ class ImageWindow(Adw.ApplicationWindow):
                     message += " (turn off “Move to Trash” in Preferences to delete permanently)"
             self.toast(message, timeout=5)
             self.rescan()
+            if self.pane.get_visible():
+                self.pane.rescan()
 
         run_in_thread(work, finished)
 
