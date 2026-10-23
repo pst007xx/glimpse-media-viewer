@@ -200,14 +200,16 @@ HELP = [
         ]),
         ("Moving and Copying", [
             ("Two folders side by side",
-             "Press F3 or use the two-pane button at the top right to show a second folder on the right. "
+             "Press F3 or use the right-panel button at the top right to show a second folder on the right. "
              "It has its own folder tree: choose any pinned folder or subfolder there, and the left side "
-             "stays where it is. Drag files from the left list onto the right one, or onto a folder in its "
-             "tree, to move them there. Drag them back onto the left list or the picture in the middle to "
-             "move them into the left side's folder; the left side stays where it is. Hold Ctrl while "
-             "dropping to copy instead. You can also select files and press F6 to move or F5 to copy them to the other side, "
-             "or use the arrow buttons at the bottom of the pane. Undo works as usual. Rename, Delete and "
-             "Properties act on the side you last clicked in."),
+             "stays where it is. Click a file in it to see a preview at the bottom of the pane."),
+            ("Move files between the two folders",
+             "Drag files from the left list onto the right one, or onto a folder in its tree, to move them "
+             "there. Drag them back onto the left list or the picture in the middle to move them into the "
+             "left side's folder. Hold Ctrl while dropping to copy instead. You can also select files and "
+             "press F6 to move or F5 to copy them to the other side, or use the arrow buttons at the bottom "
+             "of the pane. After a move the next file is selected, ready for the next one, and Undo works as "
+             "usual. Rename, Delete and Properties act on the side you last clicked in."),
             ("Select several images", "Ctrl-click or Shift-click in the image list, or press Ctrl+A to select all."),
             ("Drag onto a folder",
              "Drag images from the list onto a folder to move them there. Hold Ctrl while dropping to copy."),

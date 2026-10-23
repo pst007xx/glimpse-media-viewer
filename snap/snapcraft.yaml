@@ -23,6 +23,12 @@ description: |
   - Tick tags to find images with any of them, or only those with all of them
   - Combine all of these in one search, and see how many files match as you go
 
+  SPLIT SCREEN
+  - Show a second folder beside the first with F3, chosen in its own folder tree, so each side stays on its own folder
+  - Drag files between the two folders to move them, or hold Ctrl to copy; F6 moves and F5 copies the selection
+  - See a preview of the file selected in the second folder
+  - After each move the next file is selected, ready for the next one, and Undo puts things back
+
   ORGANISE
   - Pin your favourite folders to the sidebar, and drag files onto them to move or copy, with undo and Alt+1…9 quick-move keys
   - Copy, move, rename and delete several files at once, to the trash or permanently
