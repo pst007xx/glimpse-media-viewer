@@ -101,6 +101,9 @@ parts:
         install -Dm644 icons/io.github.pst007xx.Glimpse-$size.png \
           "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/${size}x${size}/apps/io.github.pst007xx.Glimpse.png"
       done
+      # The header's own symbolic icons, found in icons/ beside the program
+      install -Dm644 -t "$CRAFT_PART_INSTALL/bin/icons/hicolor/scalable/actions" \
+        icons/hicolor/scalable/actions/*-symbolic.svg
       mkdir -p "$CRAFT_PART_INSTALL/usr/share/applications"
       sed -e 's|@EXEC@|glimpse-media-viewer|' \
           -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/256x256/apps/io.github.pst007xx.Glimpse.png|' \

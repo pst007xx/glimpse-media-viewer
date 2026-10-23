@@ -2790,9 +2790,9 @@ class ImageWindow(Adw.ApplicationWindow):
         menu.append_section(None, section)
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
                                        tooltip_text="Main Menu"))
-        header.pack_end(Gtk.ToggleButton(icon_name="sidebar-show-right-symbolic", action_name="win.toggle-pane",
+        header.pack_end(Gtk.ToggleButton(icon_name="glimpse-split-symbolic", action_name="win.toggle-pane",
                                          tooltip_text="Show a Second Folder (F3)"))
-        header.pack_end(Gtk.Button(icon_name="help-about-symbolic", action_name="win.properties",
+        header.pack_end(Gtk.Button(icon_name="glimpse-properties-symbolic", action_name="win.properties",
                                    tooltip_text="Properties (Alt+Enter)"))
 
         zoom = Gtk.Box(css_classes=["linked"])
@@ -4297,7 +4297,7 @@ class Application(Adw.Application):
         self.thumbs = ThumbnailCache()
         self.tag_index = TagIndex()
         self.library = Library(self.tag_index)
-        # Running from the source folder: find the app icon in ./icons
+        # The app's own icons sit in ./icons beside it: in the source folder, and in the Snap's bin
         icons = os.path.join(os.path.dirname(os.path.realpath(__file__)), "icons")
         if os.path.isdir(icons):
             Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(icons)
