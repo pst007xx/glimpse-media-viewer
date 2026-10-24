@@ -1,3 +1,10 @@
+glimpse-media-viewer (1.0.4) noble; urgency=medium
+
+  * Resize the sidebar and the second folder smoothly: their edges shook
+    while being dragged.
+
+ -- Salvatore Turone <turone@hotmail.com>  Sat, 24 Oct 2026 14:40:35 +0100
+
 glimpse-media-viewer (1.0.3) noble; urgency=medium
 
   * Show the files as a grid of thumbnails, with a slider, zoom buttons and

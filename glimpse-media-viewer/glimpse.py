@@ -48,7 +48,7 @@ METADATA_LOCK = threading.Lock()
 
 APP_ID = "io.github.pst007xx.Glimpse"
 APP_NAME = "Glimpse Media Viewer"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
 # dialogs and drag-and-drop give real paths; host apps are reached via portal_open().
@@ -970,6 +970,13 @@ def show_folder(window, path):
         portal_open(window, path, directory=True)
     else:
         Gtk.FileLauncher(file=Gio.File.new_for_path(path)).launch(window, None, None)
+
+
+def pointer_x(gesture):
+    """Where the pointer is across the window, for a drag. A resize handle moves with the edge it
+    resizes, so the drag's own offsets (measured from the handle) would make the edge shake."""
+    event = gesture.get_current_event()
+    return event.get_position()[1] if event else 0.0
 
 
 def run_in_thread(work, done):
@@ -2357,7 +2364,7 @@ class FolderPane(Adw.Bin):
         # A handle on the pane's left edge: drag it to resize the pane
         handle = Gtk.Box(width_request=8, halign=Gtk.Align.START, cursor=Gdk.Cursor.new_from_name("col-resize"))
         resize = Gtk.GestureDrag()
-        resize.connect("drag-begin", lambda g, x, y: setattr(self, "resize_start", self.width))
+        resize.connect("drag-begin", lambda g, x, y: setattr(self, "resize_start", (self.width, pointer_x(g))))
         resize.connect("drag-update", self._on_resize)
         resize.connect("drag-end", lambda *_: self.settings.__setitem__("pane_width", self.width))
         handle.add_controller(resize)
@@ -2382,7 +2389,9 @@ class FolderPane(Adw.Bin):
         window = self.window
         room = (window.get_width() or 0) - window.content_min() - (window.split.get_max_sidebar_width()
                                                                    if window.split.get_show_sidebar() else 0)
-        self.width = max(PANE_MIN, min(round(self.resize_start - dx), max(PANE_MIN, room)))
+        start_width, start_x = self.resize_start
+        dx = pointer_x(gesture) - start_x
+        self.width = max(PANE_MIN, min(round(start_width - dx), max(PANE_MIN, room)))
         self.set_size_request(self.width, -1)
 
     # Folder tree
@@ -2879,7 +2888,8 @@ class ImageWindow(Adw.ApplicationWindow):
         # A handle on the sidebar's edge: drag it to resize the sidebar
         handle = Gtk.Box(width_request=8, halign=Gtk.Align.END, cursor=Gdk.Cursor.new_from_name("col-resize"))
         resize = Gtk.GestureDrag()
-        resize.connect("drag-begin", lambda g, x, y: setattr(self, "resize_start", self.sidebar_width))
+        resize.connect("drag-begin", lambda g, x, y: setattr(self, "resize_start",
+                                                             (self.sidebar_width, pointer_x(g))))
         resize.connect("drag-update", self._on_sidebar_drag)
         resize.connect("drag-end", lambda *_: self.settings.__setitem__("sidebar_width", self.sidebar_width))
         handle.add_controller(resize)
@@ -3039,7 +3049,9 @@ class ImageWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------ sidebar ---
 
     def _on_sidebar_drag(self, gesture, dx, dy):
-        self.sidebar_width = max(SIDEBAR_MIN, min(round(self.resize_start + dx), self._sidebar_limit()))
+        start_width, start_x = self.resize_start
+        dx = pointer_x(gesture) - start_x
+        self.sidebar_width = max(SIDEBAR_MIN, min(round(start_width + dx), self._sidebar_limit()))
         self._fit_sidebar()
 
     def _sidebar_limit(self):
