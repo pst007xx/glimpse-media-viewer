@@ -48,13 +48,15 @@ METADATA_LOCK = threading.Lock()
 
 APP_ID = "io.github.pst007xx.Glimpse"
 APP_NAME = "Glimpse Media Viewer"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
 # dialogs and drag-and-drop give real paths; host apps are reached via portal_open().
 IN_SNAP = "SNAP" in os.environ
 
 THUMB_SIZE = 40
+GRID_SIZES = (64, 256)  # smallest and largest thumbnails in the Files grid
+GRID_STEP = 32          # how much the zoom buttons and Ctrl+scroll change them by
 SIDEBAR_MIN = 220
 CONTENT_MIN = 360     # the sidebar never widens past what leaves this much for the image
 PANE_MIN = 330        # the second folder pane, right of the image: room for its Move, Copy and Delete buttons
@@ -174,6 +176,10 @@ HELP = [
             ("Sidebar width",
              "Drag the sidebar's right edge to make it wider or narrower. When you open folders inside "
              "folders, it widens by itself to show their full names, and goes back when you close them."),
+            ("Thumbnail grid",
+             "Click the grid button beside All, above the file list, to show the files as a grid of "
+             "thumbnails. Drag the slider under it, use its zoom buttons, or hold Ctrl and scroll over the "
+             "grid to make the thumbnails bigger or smaller. Click the grid button again for the list."),
             ("Fullscreen", "Press F11 or choose Fullscreen in the main menu. Escape leaves fullscreen."),
         ]),
     ]),
@@ -350,16 +356,22 @@ def file_types_page():
     def group(title, description, rows):
         group = Adw.PreferencesGroup(title=title, description=description)
         for name, extensions in rows:
+            subtitle = ", ".join("." + ext for ext in extensions)
+            if missing_plugin(name):
+                subtitle += " · needs the gstreamer1.0-plugins-bad package"
             group.add(Adw.ActionRow(title=GLib.markup_escape_text(name),
-                                    subtitle=", ".join("." + ext for ext in extensions), subtitle_selectable=True))
+                                    subtitle=subtitle, subtitle_selectable=True))
         page.add(group)
 
     formats = [(FORMAT_NAMES.get(f.get_description(), f.get_description()), f.get_extensions())
                for f in GdkPixbuf.Pixbuf.get_formats()]
     group("Images", "Tags can be saved in JPEG, PNG, TIFF and WebP images.",
           sorted(formats, key=lambda f: f[0].casefold()))
-    group("Videos", "Video: H.264, HEVC (H.265), VP8, VP9, MPEG-4, MPEG-2 and Windows Media. "
-          "Sound: AAC, MP3, Opus, Vorbis, FLAC and AC-3. AV1 video isn't supported.", VIDEO_FORMATS)
+    if RAW_EXTENSIONS:
+        group("Camera RAW", "Shown by the full-size preview the camera saves in the file. Tags can't be "
+              "saved in RAW files, and they can't be set as the wallpaper.", RAW_FORMATS)
+    group("Videos", "Video: H.264, HEVC (H.265), VP8, VP9, MPEG-4, MPEG-2, DV, RealVideo and Windows Media. "
+          "Sound: AAC, MP3, Opus, Vorbis, FLAC, AC-3 and DTS. AV1 video isn't supported.", VIDEO_FORMATS)
     group("Music", "Titles, artists, albums and cover art are read from the song's tags.", AUDIO_FORMATS)
     return page
 
@@ -373,6 +385,13 @@ CSS = """
 .pane-bar button {
     padding-left: 7px;
     padding-right: 7px;
+}
+.file-grid {
+    padding: 0 6px;
+}
+.file-grid > child {
+    padding: 6px;
+    border-radius: 8px;
 }
 .folder-row:drop(active), .pane-drop:drop(active) {
     background-color: alpha(@accent_bg_color, 0.3);
@@ -393,40 +412,81 @@ def _supported_extensions():
     return tuple(sorted(exts, key=len, reverse=True))
 
 
-IMAGE_EXTENSIONS = _supported_extensions()
+# Camera RAW files are shown by the full-size JPEG preview the camera saves inside them, read with GExiv2
+RAW_FORMATS = [
+    ("Canon RAW", ["cr2", "cr3", "crw"]),
+    ("Nikon RAW", ["nef", "nrw"]),
+    ("Sony RAW", ["arw", "srf", "sr2"]),
+    ("Adobe Digital Negative", ["dng"]),
+    ("Fujifilm RAW", ["raf"]),
+    ("Olympus RAW", ["orf"]),
+    ("Panasonic RAW", ["rw2"]),
+    ("Pentax RAW", ["pef"]),
+    ("Samsung RAW", ["srw"]),
+    ("Minolta RAW", ["mrw"]),
+]
+RAW_EXTENSIONS = tuple("." + ext for _, extensions in RAW_FORMATS for ext in extensions) if GExiv2 else ()
+IMAGE_EXTENSIONS = _supported_extensions() + RAW_EXTENSIONS
 
 
 VIDEO_FORMATS = [
-    ("MPEG-4", ["mp4", "m4v"]),
-    ("QuickTime", ["mov"]),
-    ("Matroska", ["mkv"]),
+    ("MPEG-4", ["mp4", "m4v", "f4v"]),
+    ("QuickTime", ["mov", "qt"]),
+    ("Matroska", ["mkv", "mk3d"]),
     ("WebM", ["webm"]),
-    ("AVI", ["avi"]),
-    ("Ogg Video", ["ogv"]),
-    ("MPEG", ["mpg", "mpeg"]),
-    ("Windows Media", ["wmv"]),
-    ("3GP", ["3gp"]),
+    ("AVI, DivX and Xvid", ["avi", "divx", "xvid"]),
+    ("Ogg Video", ["ogv", "ogm"]),
+    ("MPEG", ["mpg", "mpeg", "mpe", "vob"]),
+    ("MPEG-2 Video", ["m2v"]),
+    ("Windows Media", ["wmv", "asf"]),
+    ("3GP", ["3gp", "3g2"]),
     ("Flash Video", ["flv"]),
-    ("AVCHD", ["mts", "m2ts"]),
+    ("AVCHD", ["mts", "m2ts", "m2t"]),
+    ("RealMedia", ["rm", "rmvb"]),
+    ("DV", ["dv"]),
+    ("MXF", ["mxf"]),
 ]
 VIDEO_EXTENSIONS = tuple("." + ext for _, extensions in VIDEO_FORMATS for ext in extensions)
 AUDIO_FORMATS = [
     ("MP3", ["mp3"]),
+    ("MPEG Audio Layer II", ["mp2"]),
     ("FLAC", ["flac"]),
     ("Ogg Vorbis", ["ogg", "oga"]),
     ("Opus", ["opus"]),
-    ("AAC and Apple Lossless", ["m4a", "aac"]),
-    ("WAV", ["wav"]),
-    ("AIFF", ["aiff", "aif"]),
+    ("Speex", ["spx"]),
+    ("AAC and Apple Lossless", ["m4a", "aac", "3ga"]),
+    ("Audiobooks", ["m4b"]),
+    ("WAV", ["wav", "w64"]),
+    ("AIFF", ["aiff", "aif", "aifc"]),
+    ("Sun Audio", ["au", "snd"]),
     ("Windows Media Audio", ["wma"]),
     ("WavPack", ["wv"]),
+    ("Monkey's Audio", ["ape"]),
+    ("Musepack", ["mpc"]),
+    ("True Audio", ["tta"]),
+    ("DSD", ["dsf"]),
+    ("Dolby Digital and DTS", ["ac3", "eac3", "dts"]),
+    ("RealAudio", ["ra"]),
     ("Matroska Audio", ["mka"]),
+    ("WebM Audio", ["weba"]),
 ]
 AUDIO_EXTENSIONS = tuple("." + ext for _, extensions in AUDIO_FORMATS for ext in extensions)
+# Formats whose GStreamer demuxer comes in gstreamer1.0-plugins-bad, which may not be installed
+FORMAT_NEEDS = {"MPEG": "mpegpsdemux", "AVCHD": "tsdemux", "MXF": "mxfdemux"}
+
+
+def missing_plugin(name):
+    """True if GStreamer can't open format name here because its plugin isn't installed."""
+    element = FORMAT_NEEDS.get(name)
+    return bool(element and Gst and Gst.ElementFactory.find(element) is None)
 
 
 def is_image(name):
     return name.lower().endswith(IMAGE_EXTENSIONS)
+
+
+def is_raw(name):
+    return name.lower().endswith(RAW_EXTENSIONS)
 
 
 def is_video(name):
@@ -449,6 +509,7 @@ def search_types():
     return ([("All Types", None), ("Images", IMAGE_EXTENSIONS), ("Videos", VIDEO_EXTENSIONS),
              ("Music", AUDIO_EXTENSIONS)]
             + [(f"Image: {name}", extensions) for name, extensions in images]
+            + ([("Image: Camera RAW", RAW_EXTENSIONS)] if RAW_EXTENSIONS else [])
             + [(f"Video: {name}", tuple("." + ext for ext in extensions)) for name, extensions in VIDEO_FORMATS]
             + [(f"Music: {name}", tuple("." + ext for ext in extensions)) for name, extensions in AUDIO_FORMATS])
 
@@ -502,8 +563,55 @@ def unique_path(folder, name):
 
 
 def load_pixbuf(path):
+    if is_raw(path):
+        return raw_preview(path)
     pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
     return pixbuf.apply_embedded_orientation() or pixbuf
+
+
+def load_scaled(path, size):
+    """An image scaled to fit size, upright."""
+    if is_raw(path):
+        return raw_preview(path, size)
+    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+    return pixbuf.apply_embedded_orientation() or pixbuf
+
+
+def image_size(path):
+    """(width, height) of an image in pixels, or (0, 0) if unknown."""
+    if is_raw(path):
+        metadata = open_metadata(path)
+        return (metadata.get_pixel_width(), metadata.get_pixel_height()) if metadata else (0, 0)
+    fmt, width, height = GdkPixbuf.Pixbuf.get_file_info(path)
+    return (width, height) if fmt else (0, 0)
+
+
+def raw_preview(path, size=None):
+    """The biggest preview picture saved in a camera RAW file, upright and scaled to fit size if given."""
+    metadata = GExiv2.Metadata()
+    with METADATA_LOCK:
+        metadata.open_path(path)
+        previews = metadata.get_preview_properties() or []
+        if not previews:
+            raise OSError("This RAW file has no preview picture in it")
+        best = max(previews, key=lambda p: p.get_width() * p.get_height())
+        data = metadata.get_preview_image(best).get_data()
+        orientation = metadata.try_get_orientation() if hasattr(metadata, "try_get_orientation") \
+            else metadata.get_orientation()
+    loader = GdkPixbuf.PixbufLoader()
+    if size:
+        def fit(loader, width, height):
+            scale = min(1.0, size / width, size / height)
+            loader.set_size(max(1, round(width * scale)), max(1, round(height * scale)))
+        loader.connect("size-prepared", fit)
+    loader.write(data)
+    loader.close()
+    pixbuf = loader.get_pixbuf()
+    if int(orientation) > 1:  # the preview is stored as the sensor saw it; the RAW file says which way is up
+        pixbuf = pixbuf.copy()
+        pixbuf.set_option("orientation", str(int(orientation)))
+        pixbuf = pixbuf.apply_embedded_orientation() or pixbuf
+    return pixbuf
 
 
 def load_thumbnail(path, size):
@@ -513,7 +621,11 @@ def load_thumbnail(path, size):
             "thumbnail::path,thumbnail::is-valid", Gio.FileQueryInfoFlags.NONE, None)
         thumb = info.get_attribute_byte_string("thumbnail::path")
         if thumb and info.get_attribute_boolean("thumbnail::is-valid"):
-            return GdkPixbuf.Pixbuf.new_from_file_at_scale(thumb, size, size, True)
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file(thumb)
+            # Too small for a big grid thumbnail: an image is quick to load itself instead
+            if max(pixbuf.get_width(), pixbuf.get_height()) >= size or not is_image(path):
+                return scale_to_fit(pixbuf, size) if max(pixbuf.get_width(), pixbuf.get_height()) > size \
+                    else pixbuf
     except GLib.Error:
         pass
     if is_video(path):
@@ -521,8 +633,7 @@ def load_thumbnail(path, size):
     if is_audio(path):
         cover = song_info(path).get("cover")
         return cover and scale_to_fit(cover, size)
-    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
-    return pixbuf.apply_embedded_orientation() or pixbuf
+    return load_scaled(path, size)
 
 
 def load_preview(path, size):
@@ -532,8 +643,7 @@ def load_preview(path, size):
     if is_audio(path):
         cover = song_info(path).get("cover")
         return cover and scale_to_fit(cover, size)
-    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
-    return pixbuf.apply_embedded_orientation() or pixbuf
+    return load_scaled(path, size)
 
 
 def video_frame(path, size):
@@ -770,6 +880,8 @@ def write_tags(path, tags):
 
 
 def _write_tags(path, tags):
+    if is_raw(path):  # rewriting a camera's RAW file risks it for other photo apps
+        raise OSError("Tags can't be saved in camera RAW files")
     metadata = GExiv2.Metadata()
     metadata.open_path(path)
     if not metadata.get_supports_xmp():
@@ -882,6 +994,8 @@ class Settings(GObject.Object):
         "use_trash": True,
         "confirm_delete": True,
         "show_thumbnails": True,
+        "file_view": "list",            # list | grid: the Files list as rows, or as a grid of thumbnails
+        "grid_size": 128,               # the grid's thumbnail size in pixels
         "show_hidden": False,
         "sort_by": "name",              # name | taken | date | type | tag
         "last_target_folder": "",
@@ -1317,16 +1431,24 @@ def list_subfolders(path, show_hidden):
 
 
 class ThumbnailCache:
+    # Thumbnails are made at one of these sizes, the smallest that's sharp at the size shown
+    SIZES = (THUMB_SIZE * 2, 160, 256, 384, 512)
+    LIMIT = 256 * 1024 * 1024  # bytes of thumbnails kept; the least recently used go first
+
     def __init__(self):
-        self.cache = {}
+        self.cache = {}  # in order of use, oldest first
+        self.used = 0
         self.pending = {}
         self.pool = ThreadPoolExecutor(max_workers=3)
 
-    def get(self, item, callback):
-        """Return a cached texture, or None and call callback(texture) later."""
-        key = (item.path, item.mtime)
+    def get(self, item, callback, pixels=THUMB_SIZE * 2):
+        """Return a cached texture at least pixels big (or as big as the file), or None and
+        call callback(texture) later."""
+        size = next((s for s in self.SIZES if s >= pixels), self.SIZES[-1])
+        key = (item.path, item.mtime, size)
         if key in self.cache:
-            return self.cache[key]
+            texture = self.cache[key] = self.cache.pop(key)  # now the most recently used
+            return texture
         if key in self.pending:
             self.pending[key].append(callback)
             return None
@@ -1336,18 +1458,25 @@ class ThumbnailCache:
 
     def _work(self, key):
         try:
-            pixbuf = load_thumbnail(key[0], THUMB_SIZE * 2)
-        except GLib.Error:
+            pixbuf = load_thumbnail(key[0], key[2])
+        except (GLib.Error, OSError):
             pixbuf = None
         GLib.idle_add(self._done, key, pixbuf)
 
     def _done(self, key, pixbuf):
         texture = Gdk.Texture.new_for_pixbuf(pixbuf) if pixbuf else None
         self.cache[key] = texture
+        self.used += self._bytes(texture)
+        while self.used > self.LIMIT and len(self.cache) > 1:
+            self.used -= self._bytes(self.cache.pop(next(iter(self.cache))))
         for callback in self.pending.pop(key, []):
             if texture:
                 callback(texture)
         return False
+
+    @staticmethod
+    def _bytes(texture):
+        return texture.get_width() * texture.get_height() * 4 if texture else 0
 
     def shutdown(self):
         self.pool.shutdown(wait=False, cancel_futures=True)
@@ -1718,9 +1847,9 @@ class PropertiesDialog(Adw.PreferencesDialog):
         if info:
             rows.append(("Type", Gio.content_type_get_description(info.get_content_type() or "")))
             rows.append(("Size", GLib.format_size(info.get_size())))
-        fmt = GdkPixbuf.Pixbuf.get_file_info(path)
-        if fmt and fmt[0] and fmt[1] > 0:
-            rows.append(("Dimensions", f"{fmt[1]} × {fmt[2]} pixels"))
+        width, height = image_size(path) if is_image(path) else (0, 0)
+        if width > 0:
+            rows.append(("Dimensions", f"{width} × {height} pixels"))
         if info and (modified := info.get_modification_date_time()):
             rows.append(("Modified", modified.to_local().format("%-d %B %Y, %H:%M")))
         for label, value in rows:
@@ -2251,8 +2380,8 @@ class FolderPane(Adw.Bin):
 
     def _on_resize(self, gesture, dx, dy):
         window = self.window
-        room = (window.get_width() or 0) - CONTENT_MIN - (window.split.get_max_sidebar_width()
-                                                          if window.split.get_show_sidebar() else 0)
+        room = (window.get_width() or 0) - window.content_min() - (window.split.get_max_sidebar_width()
+                                                                   if window.split.get_show_sidebar() else 0)
         self.width = max(PANE_MIN, min(round(self.resize_start - dx), max(PANE_MIN, room)))
         self.set_size_request(self.width, -1)
 
@@ -2476,7 +2605,7 @@ class FolderPane(Adw.Bin):
             self.preview_picture.set_paintable(Gdk.Texture.new_for_pixbuf(pixbuf))
             self.preview_stack.set_visible_child_name("picture")
             if not is_video(item.path) and not is_audio(item.path):
-                width, height = GdkPixbuf.Pixbuf.get_file_info(item.path)[1:]
+                width, height = image_size(item.path)
                 if width:
                     self.preview_caption.set_label(f"{item.display_name} · {width} × {height} · "
                                                    f"{GLib.format_size(item.size)}")
@@ -2618,6 +2747,23 @@ class ImageWindow(Adw.ApplicationWindow):
         self.listview.add_css_class("navigation-sidebar")
         list_scroller = Gtk.ScrolledWindow(child=self.listview, vexpand=True,
                                            hscrollbar_policy=Gtk.PolicyType.NEVER)
+        # The same files as a grid of thumbnails, sharing the list's selection
+        grid_factory = Gtk.SignalListItemFactory()
+        grid_factory.connect("setup", self._cell_setup)
+        grid_factory.connect("bind", self._cell_bind)
+        grid_factory.connect("unbind", self._cell_unbind)
+        self.grid_cells = set()  # the cells showing files now, to resize when zooming
+        self.gridview = Gtk.GridView(model=self.selection, factory=grid_factory, max_columns=32,
+                                     css_classes=["file-grid"])
+        grid_scroller = Gtk.ScrolledWindow(child=self.gridview, vexpand=True,
+                                           hscrollbar_policy=Gtk.PolicyType.NEVER)
+        zoom_scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL,
+                                                propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        zoom_scroll.connect("scroll", self._on_grid_scroll)
+        grid_scroller.add_controller(zoom_scroll)
+        self.files_stack = Gtk.Stack(vexpand=True)
+        self.files_stack.add_named(list_scroller, "list")
+        self.files_stack.add_named(grid_scroller, "grid")
 
         # Sidebar: pinned folders, each expandable into its subfolders
         self.folder_roots = Gio.ListStore(item_type=FolderNode)
@@ -2661,16 +2807,39 @@ class ImageWindow(Adw.ApplicationWindow):
         self.view_button = Gtk.MenuButton(label="All", menu_model=self.tag_menu, css_classes=["flat"],
                                           always_show_arrow=True, tooltip_text="Show and Sort Files")
         images_header.append(self.view_button)
+        self.grid_toggle = Gtk.ToggleButton(icon_name="view-grid-symbolic", css_classes=["flat"],
+                                            tooltip_text="Show as Thumbnails")
+        self.grid_toggle.connect("toggled", lambda b: self.settings.__setitem__(
+            "file_view", "grid" if b.get_active() else "list"))
+        images_header.append(self.grid_toggle)
         self.search_close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="End Search",
                                        css_classes=["flat"], visible=False)
         self.search_close.connect("clicked", lambda *_: self.end_search())
         images_header.append(self.search_close)
+        # Thumbnail size, shown with the grid
+        self.grid_zoom = Gtk.Box(spacing=2, margin_start=6, margin_end=6)
+        self.grid_zoom.append(Gtk.Button(icon_name="zoom-out-symbolic", css_classes=["flat"],
+                                         tooltip_text="Smaller Thumbnails (Ctrl+Scroll)"))
+        self.grid_scale = Gtk.Scale(adjustment=Gtk.Adjustment(lower=GRID_SIZES[0], upper=GRID_SIZES[1],
+                                                              step_increment=8, page_increment=GRID_STEP),
+                                    hexpand=True, draw_value=False, tooltip_text="Thumbnail Size")
+        self.grid_scale.set_value(self.settings["grid_size"])
+        self.grid_scale.connect("value-changed", lambda s: self.settings.__setitem__(
+            "grid_size", round(s.get_value() / 8) * 8))
+        self.grid_zoom.append(self.grid_scale)
+        self.grid_zoom.append(Gtk.Button(icon_name="zoom-in-symbolic", css_classes=["flat"],
+                                         tooltip_text="Larger Thumbnails (Ctrl+Scroll)"))
+        self.grid_zoom.get_first_child().connect("clicked", lambda *_: self.zoom_grid(-GRID_STEP))
+        self.grid_zoom.get_last_child().connect("clicked", lambda *_: self.zoom_grid(GRID_STEP))
+
         images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, height_request=120)
         images_box.append(images_header)
-        images_box.append(list_scroller)
-        focus = Gtk.EventControllerFocus()
-        focus.connect("enter", lambda *_: self.set_pane_active(False))
-        self.listview.add_controller(focus)
+        images_box.append(self.grid_zoom)
+        images_box.append(self.files_stack)
+        for view in (self.listview, self.gridview):
+            focus = Gtk.EventControllerFocus()
+            focus.connect("enter", lambda *_: self.set_pane_active(False))
+            view.add_controller(focus)
         # Files dragged here from the second folder move into this one
         list_drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
         list_drop.connect("accept", lambda t, d: self.pane_drag and self.folder is not None)
@@ -2678,8 +2847,8 @@ class ImageWindow(Adw.ApplicationWindow):
         list_drop.connect("motion", lambda t, x, y: self._drop_action(t))
         list_drop.connect("drop", lambda t, value, x, y: self.pane.shown_folder() is not None
                           and self.pane._on_drop(t, value, self.folder))
-        list_scroller.add_css_class("pane-drop")
-        list_scroller.add_controller(list_drop)
+        self.files_stack.add_css_class("pane-drop")
+        self.files_stack.add_controller(list_drop)
 
         sidebar_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, start_child=folders_box,
                                   end_child=images_box, position=230,
@@ -2828,6 +2997,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self.folder_tree.connect("items-changed", lambda *_: self._queue_fit_sidebar())
         for signal in ("map", "notify::default-width", "notify::maximized", "notify::fullscreened"):
             self.connect(signal, lambda *_: self._queue_fit_sidebar())
+        self.connect("map", lambda *_: GLib.idle_add(self._fit_window))
         self._fit_sidebar()
         self.split.bind_property("show-sidebar", self.sidebar_toggle, "active",
                                  GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.BIDIRECTIONAL)
@@ -2857,13 +3027,14 @@ class ImageWindow(Adw.ApplicationWindow):
         file_menu.append_section(None, section)
 
         self.list_menu = Gtk.PopoverMenu(menu_model=file_menu, has_arrow=False, halign=Gtk.Align.START)
-        self.list_menu.set_parent(self.listview)
+        self.list_menu.set_parent(self.files_stack)
         self.image_menu = Gtk.PopoverMenu(menu_model=file_menu, has_arrow=False, halign=Gtk.Align.START)
         self.image_menu.set_parent(self.scroller)
         self.folder_menu = Gtk.PopoverMenu(has_arrow=False, halign=Gtk.Align.START)
         self.folder_menu.set_parent(self.folder_view)
 
         self.stack.set_visible_child_name("welcome")
+        self._show_file_view()
 
     # ------------------------------------------------------------ sidebar ---
 
@@ -2874,7 +3045,26 @@ class ImageWindow(Adw.ApplicationWindow):
     def _sidebar_limit(self):
         """Widest the sidebar may get, leaving room for the image (and the second folder)."""
         pane = self.pane.width if self.pane.get_visible() else 0
-        return max(SIDEBAR_MIN, (self.get_width() or self.get_default_size()[0]) - CONTENT_MIN - pane)
+        return max(SIDEBAR_MIN, (self.get_width() or self.get_default_size()[0]) - self.content_min() - pane)
+
+    def content_min(self):
+        """Narrowest the image may get: enough for its header's buttons."""
+        return max(CONTENT_MIN, self.content.measure(Gtk.Orientation.HORIZONTAL, -1)[0])
+
+    def _fit_window(self):
+        """Widen the window if the sidebar, image and second folder don't fit, so no header button
+        (the close button above all) is cut off at the right. The breakpoint lets the window get
+        narrower than its content, so GTK doesn't do this itself."""
+        if self.is_maximized() or self.is_fullscreen() or not self.get_mapped():
+            return False
+        need = self.toasts.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        width, height = self.get_width(), self.get_height()
+        if width < need:
+            monitor = self.get_display().get_monitor_at_surface(self.get_surface())
+            if monitor:
+                need = min(need, monitor.get_geometry().width)
+            self.set_default_size(need, height)
+        return False
 
     def _queue_fit_sidebar(self):
         # Expanding a folder changes the tree several times in a row: fit once afterwards
@@ -2916,6 +3106,11 @@ class ImageWindow(Adw.ApplicationWindow):
         text.append(box.tags)
         box.append(box.thumb)
         box.append(text)
+        self._add_file_controllers(box, list_item)
+        list_item.set_child(box)
+
+    def _add_file_controllers(self, box, list_item):
+        """A file's right-click menu, and dragging it onto folders."""
         click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
         click.connect("pressed", self._on_row_context, list_item, box)
         box.add_controller(click)
@@ -2923,7 +3118,38 @@ class ImageWindow(Adw.ApplicationWindow):
         drag.connect("prepare", self._on_row_drag_prepare, list_item)
         drag.connect("drag-begin", lambda source, d: source.set_icon(Gtk.WidgetPaintable(widget=box), 0, 0))
         box.add_controller(drag)
+
+    def _cell_setup(self, factory, list_item):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.thumb = Gtk.Image()
+        box.label = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["caption"])
+        box.item = None
+        box.append(box.thumb)
+        box.append(box.label)
+        self._add_file_controllers(box, list_item)
         list_item.set_child(box)
+
+    def _cell_bind(self, factory, list_item):
+        box = list_item.get_child()
+        box.item = list_item.get_item()
+        self.grid_cells.add(box)
+        self._fill_cell(box)
+
+    def _cell_unbind(self, factory, list_item):
+        box = list_item.get_child()
+        box.item = None
+        self.grid_cells.discard(box)
+
+    def _fill_cell(self, box):
+        item = box.item
+        size = self.settings["grid_size"]
+        box.thumb.size = size
+        box.thumb.set_size_request(size, size)
+        box.label.set_size_request(size, -1)
+        box.label.set_label(item.display_name)
+        tooltip = GLib.filename_display_name(item.path) if self.search else item.display_name
+        box.set_tooltip_text(tooltip + (f"\n{', '.join(item.tags)}" if item.tags else ""))
+        self._bind_thumb(box, item, size * max(1, self.get_scale_factor()))
 
     def _on_row_drag_prepare(self, source, x, y, list_item):
         pos = list_item.get_position()
@@ -2948,20 +3174,60 @@ class ImageWindow(Adw.ApplicationWindow):
         box.set_tooltip_text(tooltip + (f"\n{', '.join(item.tags)}" if item.tags else ""))
         show = self.settings["show_thumbnails"]
         box.thumb.set_visible(show)
-        if not show:
-            return
+        if show:
+            self._bind_thumb(box, item, THUMB_SIZE * 2)
+
+    def _bind_thumb(self, box, item, pixels):
+        size = getattr(box.thumb, "size", None)  # a grid cell's, or None in the list
+
+        def show(texture):
+            box.thumb.remove_css_class("dim-label")
+            if size:
+                box.thumb.set_pixel_size(size)
+            box.thumb.set_from_paintable(texture)
 
         def ready(texture):
             if box.item is item:
-                box.thumb.set_from_paintable(texture)
+                show(texture)
 
-        texture = self.thumbs.get(item, ready)
+        texture = self.thumbs.get(item, ready, pixels)
         if texture:
-            box.thumb.set_from_paintable(texture)
+            show(texture)
         else:
+            box.thumb.add_css_class("dim-label")
+            if size:
+                box.thumb.set_pixel_size(size // 2)  # a placeholder icon, smaller than the thumbnail
             box.thumb.set_from_icon_name("video-x-generic-symbolic" if is_video(item.path)
                                          else "audio-x-generic-symbolic" if is_audio(item.path)
                                          else "image-x-generic-symbolic")
+
+    # Grid of thumbnails
+
+    def file_view(self):
+        """The list or the grid, whichever shows the files."""
+        return self.gridview if self.settings["file_view"] == "grid" else self.listview
+
+    def _show_file_view(self):
+        grid = self.settings["file_view"] == "grid"
+        self.grid_toggle.set_active(grid)
+        self.grid_zoom.set_visible(grid)
+        self.files_stack.set_visible_child_name("grid" if grid else "list")
+        self.grid_scale.set_value(self.settings["grid_size"])
+
+    def zoom_grid(self, step):
+        size = min(GRID_SIZES[1], max(GRID_SIZES[0], self.settings["grid_size"] + step))
+        self.grid_scale.set_value(size)  # which saves it
+
+    def _on_grid_scroll(self, controller, dx, dy):
+        if not controller.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK:
+            return False
+        if dy:
+            self.zoom_grid(-GRID_STEP if dy > 0 else GRID_STEP)
+        return True
+
+    def _resize_grid(self):
+        for box in list(self.grid_cells):
+            self._fill_cell(box)
 
     def _row_unbind(self, factory, list_item):
         list_item.get_child().item = None
@@ -2970,7 +3236,7 @@ class ImageWindow(Adw.ApplicationWindow):
         pos = list_item.get_position()
         if not self.selection.is_selected(pos):
             self.selection.select_item(pos, True)
-        ok, point = box.compute_point(self.listview, Graphene.Point().init(x, y))
+        ok, point = box.compute_point(self.files_stack, Graphene.Point().init(x, y))
         self._popup(self.list_menu, point.x if ok else x, point.y if ok else y)
 
     # -------------------------------------------------------- folder tree ---
@@ -3502,7 +3768,7 @@ class ImageWindow(Adw.ApplicationWindow):
                 self.selection.select_item(self.path_index[p], False)
         else:
             self.selection.select_item(self.path_index[target], True)
-        self.listview.scroll_to(self.path_index[target], Gtk.ListScrollFlags.NONE, None)
+        self.file_view().scroll_to(self.path_index[target], Gtk.ListScrollFlags.NONE, None)
         self.display(target)
         self.update_actions()
 
@@ -3665,6 +3931,8 @@ class ImageWindow(Adw.ApplicationWindow):
         else:
             self.set_pane_active(False)
         self._fit_sidebar()
+        if shown:
+            GLib.idle_add(self._fit_window)
         self.update_actions()
 
     def set_pane_active(self, active):
@@ -3719,7 +3987,7 @@ class ImageWindow(Adw.ApplicationWindow):
         if n == 0:
             return
         index = max(0, min(index, n - 1))
-        self.listview.scroll_to(index, Gtk.ListScrollFlags.SELECT | Gtk.ListScrollFlags.FOCUS, None)
+        self.file_view().scroll_to(index, Gtk.ListScrollFlags.SELECT | Gtk.ListScrollFlags.FOCUS, None)
 
     def go(self, delta):
         index = self.path_index.get(self.current_path)
@@ -3818,6 +4086,8 @@ class ImageWindow(Adw.ApplicationWindow):
             return
         # GStreamer's message starts "Error from element /GstPlayBin:…: <reason>" and adds debug lines
         reason = stream.get_error().message.split("\n")[0].rpartition(": ")[2]
+        if "missing a plug-in" in reason and not IN_SNAP:
+            reason += " Installing the gstreamer1.0-plugins-bad package may let it play."
         self.error_page.set_title("Could Not Play Music" if is_audio(self.current_path or "")
                                   else "Could Not Play Video")
         self.error_page.set_description(GLib.markup_escape_text(reason))
@@ -3871,7 +4141,7 @@ class ImageWindow(Adw.ApplicationWindow):
             "open-with": self.current_path is not None,
             "show-containing": self.current_path is not None,
             "properties": self.current_path is not None,
-            "wallpaper": has_image,
+            "wallpaper": has_image and not is_raw(self.current_path),
             "copy-to": bool(targets),
             "move-to": bool(targets),
             "delete": bool(targets),
@@ -4262,6 +4532,13 @@ class ImageWindow(Adw.ApplicationWindow):
         if key in ("sort_by", "show_hidden", "show_thumbnails"):
             self.rescan()
             self.pane.rescan()
+        if key == "file_view":
+            self._show_file_view()
+            if self.current_path in self.path_index:
+                self.file_view().scroll_to(self.path_index[self.current_path], Gtk.ListScrollFlags.NONE, None)
+        if key == "grid_size":
+            self.grid_scale.set_value(settings["grid_size"])
+            self._resize_grid()
         if key in ("folders", "show_hidden"):
             self.rebuild_folders()
         if key in ("folders", "show_hidden"):

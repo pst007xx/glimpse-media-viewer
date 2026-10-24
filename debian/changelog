@@ -1,3 +1,18 @@
+glimpse-media-viewer (1.0.3) noble; urgency=medium
+
+  * Show the files as a grid of thumbnails, with a slider, zoom buttons and
+    Ctrl+scroll to change their size.
+  * Open camera RAW files (Canon, Nikon, Sony, DNG, Fujifilm, Olympus,
+    Panasonic, Pentax, Samsung, Minolta) by their embedded preview.
+  * Play more video formats (VOB, MPE, M2V, ASF, DivX, Xvid, F4V, 3G2, OGM,
+    RealMedia, DV, MXF and more) and music formats (M4B audiobooks, MP2, APE,
+    Musepack, True Audio, DSD, AC-3, DTS, Speex and more).
+  * Recommend gstreamer1.0-plugins-bad, for MPEG, AVCHD and MXF files.
+  * Widen the window when it opens if the sidebar, picture and second folder
+    don't fit, so the close button is never cut off.
+
+ -- Salvatore Turone <turone@hotmail.com>  Sat, 24 Oct 2026 14:24:40 +0100
+
 glimpse-media-viewer (1.0.2) noble; urgency=medium
 
   * First Debian package: view and organise images, videos and music, with

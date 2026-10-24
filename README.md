@@ -8,13 +8,15 @@ Glimpse Media Viewer is a fast, simple viewer and organiser for your photos, vid
 
 ### View
 - Thumbnails of every image and video, and cover art for songs
+- See the files as a list, or as a grid of thumbnails you can make bigger or smaller with a slider or Ctrl+scroll
 - Zoom with buttons, the keyboard, Ctrl+scroll or a pinch, and drag to pan
 - JPEG, PNG, WebP, HEIC, AVIF, TIFF, SVG, GIF and many other image formats
+- Camera RAW files from Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax and others, plus Adobe DNG
 - Fullscreen viewing: press F11, or double-click a video
 
 ### Play
-- Videos play right in the window: MP4, MOV, MKV, WebM, AVI, WMV and more, with H.264, HEVC, VP9 and other common codecs
-- Music shows its title, artist, album and cover art: MP3, FLAC, Ogg, Opus, AAC, Apple Lossless, WAV, AIFF, WMA and WavPack
+- Videos play right in the window: MP4, MOV, MKV, WebM, AVI, DivX, WMV, MPEG, VOB, AVCHD, RealMedia, DV and more, with H.264, HEVC, VP9 and other common codecs
+- Music shows its title, artist, album and cover art: MP3, FLAC, Ogg, Opus, AAC, Apple Lossless, M4B audiobooks, WAV, AIFF, WMA, WavPack, Monkey's Audio, Musepack, DSD, AC-3, DTS and more
 - A folder of songs plays straight through, like an album
 
 ### Search

@@ -20,6 +20,7 @@ Recommends: gir1.2-gexiv2-0.10,
             gir1.2-gst-plugins-base-1.0,
             libgtk-4-media-gstreamer,
             gstreamer1.0-plugins-good,
+            gstreamer1.0-plugins-bad,
             gstreamer1.0-libav,
 Suggests: gstreamer1.0-plugins-ugly,
 Description: view and organise your images, videos and music
