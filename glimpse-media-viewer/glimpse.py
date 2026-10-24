@@ -48,7 +48,7 @@ METADATA_LOCK = threading.Lock()
 
 APP_ID = "io.github.pst007xx.Glimpse"
 APP_NAME = "Glimpse Media Viewer"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
 # dialogs and drag-and-drop give real paths; host apps are reached via portal_open().
@@ -181,6 +181,10 @@ HELP = [
              "thumbnails. Drag the slider under it, use its zoom buttons, or hold Ctrl and scroll over the "
              "grid to make the thumbnails bigger or smaller. Click the grid button again for the list."),
             ("Fullscreen", "Press F11 or choose Fullscreen in the main menu. Escape leaves fullscreen."),
+            ("Where you left off",
+             "Glimpse opens at the folder and file you were viewing last, with the window the same size "
+             "(or maximised) and the sidebar as you left it. A song or video shown last waits for you to "
+             "press play."),
         ]),
     ]),
     ("Organising", "folder-symbolic", [
@@ -1007,6 +1011,11 @@ class Settings(GObject.Object):
         "sort_by": "name",              # name | taken | date | type | tag
         "last_target_folder": "",
         "last_folder": "",
+        "last_file": "",                # the file shown last, shown again on starting
+        "window_width": 1100,           # the window's size when not maximised
+        "window_height": 720,
+        "window_maximized": False,
+        "folders_height": 230,          # the Folders section's height, above Files
         "folders": [],                  # folders pinned in the sidebar
         "sidebar_width": 280,           # as dragged; the sidebar widens beyond it to fit open folders
         "pane_shown": False,            # the second folder pane, right of the image
@@ -2704,9 +2713,14 @@ class FolderPane(Adw.Bin):
 
 class ImageWindow(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title=APP_NAME, default_width=1100, default_height=720)
+        settings = app.settings
+        super().__init__(application=app, title=APP_NAME, default_width=settings["window_width"],
+                         default_height=settings["window_height"])
         self.set_size_request(360, 300)
+        if settings["window_maximized"]:
+            self.maximize()
         self.settings = app.settings
+        self.quiet_path = None  # a song or video reopened on starting, shown without playing
         self.thumbs = app.thumbs
         self.tag_index = app.tag_index
         self.library = app.library
@@ -2860,8 +2874,9 @@ class ImageWindow(Adw.ApplicationWindow):
         self.files_stack.add_controller(list_drop)
 
         sidebar_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, start_child=folders_box,
-                                  end_child=images_box, position=230,
+                                  end_child=images_box, position=self.settings["folders_height"],
                                   shrink_start_child=False, shrink_end_child=False)
+        self.sidebar_paned = sidebar_paned
 
         self.sidebar_title = Adw.WindowTitle(title=APP_NAME)
         sidebar_header = Adw.HeaderBar(title_widget=self.sidebar_title)
@@ -3373,6 +3388,7 @@ class ImageWindow(Adw.ApplicationWindow):
         self._sync_folder_selection()
 
     def _sync_folder_selection(self):
+        self._reveal_folder()
         self.folder_updating = True
         try:
             for i in range(self.folder_tree.get_n_items()):
@@ -3383,6 +3399,21 @@ class ImageWindow(Adw.ApplicationWindow):
                 self.folder_selection.set_selected(Gtk.INVALID_LIST_POSITION)
         finally:
             self.folder_updating = False
+
+    def _reveal_folder(self):
+        """Expand the folder tree down to the folder shown, if it's inside a pinned folder."""
+        folder = self.folder
+        if not folder:
+            return
+        i = 0
+        while i < self.folder_tree.get_n_items():
+            row = self.folder_tree.get_item(i)
+            path = row.get_item().path
+            if path == folder:
+                return
+            if folder.startswith(path.rstrip(os.sep) + os.sep) and row.is_expandable():
+                row.set_expanded(True)  # its subfolders now follow it in the tree
+            i += 1
 
     def _on_folder_selected(self, selection, position, n_items):
         if self.folder_updating:
@@ -4018,6 +4049,8 @@ class ImageWindow(Adw.ApplicationWindow):
             return
         self.current_path = path
         self.current_mtime = item.mtime
+        if not self.search:
+            self.settings["last_file"] = path
         self.load_generation += 1
         generation = self.load_generation
         self.stop_media()
@@ -4061,7 +4094,10 @@ class ImageWindow(Adw.ApplicationWindow):
         else:
             self.video.set_media_stream(stream)
             self.stack.set_visible_child_name("video")
-        stream.play()
+        if path == self.quiet_path:
+            self.quiet_path = None  # reopened on starting: wait for the play button
+        else:
+            stream.play()
 
     def _show_song(self, path):
         self.cover.set_from_icon_name("audio-x-generic-symbolic")
@@ -4556,6 +4592,27 @@ class ImageWindow(Adw.ApplicationWindow):
         if key in ("folders", "show_hidden"):
             self.pane.rebuild_tree()
 
+    def save_window_state(self):
+        # The default size follows the window's size whenever it isn't maximised or fullscreen
+        width, height = self.get_default_size()
+        if width > 0 and height > 0:
+            self.settings["window_width"] = width
+            self.settings["window_height"] = height
+        if not self.is_fullscreen():  # fullscreen hides whether it was maximised
+            self.settings["window_maximized"] = self.is_maximized()
+        self.settings["folders_height"] = self.sidebar_paned.get_position()
+
+    def restore(self):
+        """Show the folder and file shown last, as when Glimpse was closed."""
+        folder, path = self.settings["last_folder"], self.settings["last_file"]
+        if not folder or not os.path.isdir(folder):
+            return
+        if path and os.path.dirname(path) == folder and os.path.isfile(path):
+            self.quiet_path = path if is_video(path) or is_audio(path) else None
+            self.open_path(path)
+        else:
+            self.open_path(folder)
+
     def _on_fullscreen_changed(self, *_):
         fullscreen = self.is_fullscreen()
         self.content.set_reveal_top_bars(not fullscreen)
@@ -4569,6 +4626,7 @@ class ImageWindow(Adw.ApplicationWindow):
             self.pane.set_visible(self.pane_before_fullscreen)
 
     def _on_close(self, *_):
+        self.save_window_state()
         self.stop_media()
         if self.monitor:
             self.monitor.cancel()
@@ -4648,9 +4706,7 @@ class Application(Adw.Application):
         window = self.get_active_window()
         if window is None:
             window = ImageWindow(self)
-            last = self.settings["last_folder"]
-            if last and os.path.isdir(last):
-                window.open_path(last)
+            window.restore()
         window.present()
 
     def do_open(self, files, n_files, hint):

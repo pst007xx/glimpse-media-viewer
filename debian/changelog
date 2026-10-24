@@ -1,3 +1,12 @@
+glimpse-media-viewer (1.0.5) noble; urgency=medium
+
+  * Open where you left off: the window keeps its size (or stays
+    maximised), the file shown last is shown again (a song or video waits
+    for play), the folder tree opens down to the last folder, and the
+    divider between Folders and Files stays where it was put.
+
+ -- Salvatore Turone <turone@hotmail.com>  Sat, 24 Oct 2026 14:45:58 +0100
+
 glimpse-media-viewer (1.0.4) noble; urgency=medium
 
   * Resize the sidebar and the second folder smoothly: their edges shook
