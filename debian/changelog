@@ -1,3 +1,13 @@
+glimpse-media-viewer (1.0.6) noble; urgency=medium
+
+  * Keep the close button in view in a narrow window: the sidebar, then the
+    second folder, get narrower to make room, and go back to their own
+    widths when the window is wider again. With the second folder showing,
+    the window keeps the width it needs; below 800 pixels the sidebar slides
+    over the picture.
+
+ -- Salvatore Turone <turone@hotmail.com>  Sat, 24 Oct 2026 14:54:23 +0100
+
 glimpse-media-viewer (1.0.5) noble; urgency=medium
 
   * Open where you left off: the window keeps its size (or stays

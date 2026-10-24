@@ -48,7 +48,7 @@ METADATA_LOCK = threading.Lock()
 
 APP_ID = "io.github.pst007xx.Glimpse"
 APP_NAME = "Glimpse Media Viewer"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 # In the Snap, GTK portals are off (GDK_DEBUG=no-portals in snapcraft.yaml) so file
 # dialogs and drag-and-drop give real paths; host apps are reached via portal_open().
@@ -2716,7 +2716,7 @@ class ImageWindow(Adw.ApplicationWindow):
         settings = app.settings
         super().__init__(application=app, title=APP_NAME, default_width=settings["window_width"],
                          default_height=settings["window_height"])
-        self.set_size_request(360, 300)
+        self.set_size_request(360, 300)  # wider while the second folder shows: see _fit_sidebar
         if settings["window_maximized"]:
             self.maximize()
         self.settings = app.settings
@@ -3030,7 +3030,8 @@ class ImageWindow(Adw.ApplicationWindow):
         self.toasts = Adw.ToastOverlay(child=self.split)
         self.set_content(self.toasts)
 
-        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 640sp"))
+        # Narrower than the sidebar's least width beside the image's header: the sidebar slides over instead
+        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 800sp"))
         breakpoint.add_setter(self.split, "collapsed", True)
         self.add_breakpoint(breakpoint)
 
@@ -3072,7 +3073,7 @@ class ImageWindow(Adw.ApplicationWindow):
     def _sidebar_limit(self):
         """Widest the sidebar may get, leaving room for the image (and the second folder)."""
         pane = self.pane.width if self.pane.get_visible() else 0
-        return max(SIDEBAR_MIN, (self.get_width() or self.get_default_size()[0]) - self.content_min() - pane)
+        return max(SIDEBAR_MIN, self._window_width() - self.content_min() - pane)
 
     def content_min(self):
         """Narrowest the image may get: enough for its header's buttons."""
@@ -3097,7 +3098,7 @@ class ImageWindow(Adw.ApplicationWindow):
         # Expanding a folder changes the tree several times in a row: fit once afterwards
         # (and a resized window has its new width only after a moment)
         if self.fit_source is None:
-            self.fit_source = GLib.timeout_add(50, self._on_fit_timeout)
+            self.fit_source = GLib.idle_add(self._on_fit_timeout)
 
     def _on_fit_timeout(self):
         self.fit_source = None
@@ -3105,9 +3106,32 @@ class ImageWindow(Adw.ApplicationWindow):
         return False
 
     def _fit_sidebar(self):
-        width = max(self.sidebar_width, min(self._tree_width(), self._sidebar_limit()))
+        limit = self._sidebar_limit()
+        # As dragged, wider for long folder names; narrower if the window is too narrow for it, so
+        # the image's header keeps its buttons (the dragged width comes back when there's room)
+        width = min(max(self.sidebar_width, min(self._tree_width(), limit)), limit)
         self.split.set_min_sidebar_width(width)
         self.split.set_max_sidebar_width(width)
+        if self.pane.get_visible():
+            beside = width if self.split.get_show_sidebar() and not self.split.get_collapsed() else 0
+            room = self._window_width() - self.content_min() - beside
+            self.pane.set_size_request(max(PANE_MIN, min(self.pane.width, room)), -1)
+            # No narrower than the sidebar, image and second folder at their least, or the close
+            # button (on the second folder's header) would be cut off
+            least = (SIDEBAR_MIN if beside else 0) + self.content_min() + PANE_MIN
+        else:
+            least = 360
+        if self.get_size_request()[0] != least:
+            self.set_size_request(least, 300)
+
+    def _window_width(self):
+        return self.get_width() or self.get_default_size()[0]
+
+    def do_size_allocate(self, width, height, baseline):
+        Adw.ApplicationWindow.do_size_allocate(self, width, height, baseline)
+        if width != getattr(self, "allocated_width", None):
+            self.allocated_width = width
+            self._queue_fit_sidebar()  # not during layout: it changes the sidebar's size
 
     def _tree_width(self):
         """Width the sidebar needs to show every visible folder's name in full."""
