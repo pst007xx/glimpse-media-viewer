@@ -37,7 +37,10 @@ Glimpse Media Viewer is a fast, simple viewer and organiser for your photos, vid
 - Show a second folder beside the first with F3, chosen in its own folder tree, so each side stays on its own folder
 - Drag files between the two folders to move them, or hold Ctrl to copy; F6 moves and F5 copies the selection
 - See a preview of the file selected in the second folder
+- Move and Copy buttons send files either way, and a Delete button removes the files selected in the second folder
 - After each move the next file is selected, ready for the next one, and Undo puts things back
+
+![Glimpse Media Viewer with a second folder shown beside the image, its folder tree, files and a preview](docs/second-folder.png)
 
 ### More
 - Properties shows file and camera details: camera, lens, exposure and date taken
@@ -64,9 +67,12 @@ On Ubuntu or Debian, install the dependencies and run the script:
 
 ```sh
 sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-gexiv2-0.10 \
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
+    gir1.2-gst-plugins-base-1.0 libgtk-4-media-gstreamer \
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
 python3 glimpse-media-viewer/glimpse.py
 ```
+
+To add it to Activities and run it as `glimpse`, run `glimpse-media-viewer/install.sh` as your own user (no root needed).
 
 GExiv2 is optional (without it Properties shows file details only), and GStreamer is needed only for video and music.
 
