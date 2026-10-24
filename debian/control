@@ -1,0 +1,33 @@
+Source: glimpse-media-viewer
+Section: graphics
+Priority: optional
+Maintainer: Salvatore Turone <turone@hotmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/pst007xx/glimpse-media-viewer
+Vcs-Browser: https://github.com/pst007xx/glimpse-media-viewer
+Vcs-Git: https://github.com/pst007xx/glimpse-media-viewer.git
+Rules-Requires-Root: no
+
+Package: glimpse-media-viewer
+Architecture: all
+Depends: ${misc:Depends},
+         python3,
+         python3-gi,
+         gir1.2-gtk-4.0,
+         gir1.2-adw-1,
+Recommends: gir1.2-gexiv2-0.10,
+            gir1.2-gst-plugins-base-1.0,
+            libgtk-4-media-gstreamer,
+            gstreamer1.0-plugins-good,
+            gstreamer1.0-libav,
+Suggests: gstreamer1.0-plugins-ugly,
+Description: view and organise your images, videos and music
+ Glimpse Media Viewer is a fast, simple viewer and organiser for your photos,
+ videos and music, made to fit right into GNOME. Open any file and everything
+ in its folder is ready to browse in the sidebar, with thumbnails, tags and
+ cover art.
+ .
+ It plays videos and music in the window, saves picture tags as standard XMP
+ and IPTC keywords, searches pinned folders by name, type, date and tag, and
+ shows a second folder beside the first for moving and copying files.

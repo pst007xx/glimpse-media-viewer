@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+# The program and the icons it loads beside it go in /usr/share/glimpse-media-viewer;
+# /usr/bin has a link to it.
+
+APP = io.github.pst007xx.Glimpse
+SRC = glimpse-media-viewer
+DEST = debian/glimpse-media-viewer
+SHARE = $(DEST)/usr/share/glimpse-media-viewer
+
+%:
+	dh $@
+
+override_dh_auto_build:
+
+override_dh_auto_install:
+	install -Dm755 $(SRC)/glimpse.py $(SHARE)/glimpse.py
+	install -Dm644 -t $(SHARE)/icons/hicolor/scalable/actions $(SRC)/icons/hicolor/scalable/actions/*-symbolic.svg
+	mkdir -p $(DEST)/usr/bin
+	ln -s ../share/glimpse-media-viewer/glimpse.py $(DEST)/usr/bin/glimpse-media-viewer
+	for size in 48 64 128 256; do \
+		install -Dm644 $(SRC)/icons/$(APP)-$$size.png \
+			$(DEST)/usr/share/icons/hicolor/$${size}x$${size}/apps/$(APP).png; \
+	done
+	mkdir -p $(DEST)/usr/share/applications
+	sed 's|@EXEC@|glimpse-media-viewer|' $(SRC)/$(APP).desktop > $(DEST)/usr/share/applications/$(APP).desktop

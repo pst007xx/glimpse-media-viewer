@@ -49,13 +49,29 @@ Glimpse Media Viewer is a fast, simple viewer and organiser for your photos, vid
 
 ## Install
 
-Glimpse is packaged as a snap, `glimpse-media-viewer`. The Snap Store release is waiting for review; once it's published:
+### Ubuntu .deb (PPA)
+
+On Ubuntu 24.04 (Noble), install the .deb from the [Glimpse PPA](https://launchpad.net/~turone/+archive/ubuntu/glimpse):
+
+```sh
+sudo add-apt-repository ppa:turone/glimpse
+sudo apt update
+sudo apt install glimpse-media-viewer
+```
+
+Updates then arrive with your other system updates. The same PPA also has [Glimpse File Manager](https://github.com/pst007xx/glimpse-file-manager), a column-view file manager built on Glimpse: `sudo apt install glimpse-file-manager`.
+
+You can also download the .deb from the [latest release](https://github.com/pst007xx/glimpse-media-viewer/releases/latest) and install it with `sudo apt install ./glimpse-media-viewer_*_all.deb`.
+
+### Snap
+
+Glimpse is also packaged as a snap, `glimpse-media-viewer`. The Snap Store release is waiting for review; once it's published:
 
 ```sh
 sudo snap install glimpse-media-viewer
 ```
 
-To use files on external drives, connect the removable-media interface:
+To use files on external drives with the snap, connect the removable-media interface:
 
 ```sh
 snap connect glimpse-media-viewer:removable-media

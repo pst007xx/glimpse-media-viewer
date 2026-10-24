@@ -1,0 +1,6 @@
+glimpse-media-viewer (1.0.2) noble; urgency=medium
+
+  * First Debian package: view and organise images, videos and music, with
+    tags, search, pinned folders and a second folder pane.
+
+ -- Salvatore Turone <turone@hotmail.com>  Sat, 24 Oct 2026 08:41:25 +0100
